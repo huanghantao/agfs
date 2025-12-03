@@ -376,5 +376,28 @@ class TestBuiltins(unittest.TestCase):
             # Clean up temp directory
             shutil.rmtree(temp_dir)
 
+    def test_date(self):
+        """Test date command calls system date and returns output"""
+        cmd = BUILTINS['date']
+
+        # Test basic date command (no arguments)
+        proc = self.create_process("date", [])
+        exit_code = cmd(proc)
+        self.assertEqual(exit_code, 0)
+
+        # Output should contain date/time information (not empty)
+        output = proc.get_stdout().decode('utf-8')
+        self.assertTrue(len(output) > 0)
+
+        # Test date with format argument
+        proc = self.create_process("date", ["+%Y"])
+        exit_code = cmd(proc)
+        self.assertEqual(exit_code, 0)
+
+        # Should return current year (4 digits + newline)
+        output = proc.get_stdout().decode('utf-8').strip()
+        self.assertTrue(output.isdigit())
+        self.assertEqual(len(output), 4)
+
 if __name__ == '__main__':
     unittest.main()
