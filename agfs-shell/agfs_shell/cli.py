@@ -139,6 +139,18 @@ def main():
                         default=None)
     parser.add_argument('--help', '-h', action='store_true',
                         help='Show this help message')
+    parser.add_argument('--webapp',
+                        action='store_true',
+                        help='Start web application server')
+    parser.add_argument('--webapp-host',
+                        dest='webapp_host',
+                        default='localhost',
+                        help='Web app host (default: localhost)')
+    parser.add_argument('--webapp-port',
+                        dest='webapp_port',
+                        type=int,
+                        default=3000,
+                        help='Web app port (default: 3000)')
     parser.add_argument('script', nargs='?', help='Script file to execute')
     parser.add_argument('args', nargs='*', help='Arguments to script (or command if no script)')
 
@@ -154,6 +166,21 @@ def main():
 
     # Initialize shell with configuration
     shell = Shell(server_url=config.server_url, timeout=config.timeout)
+
+    # Check if webapp mode is requested
+    if args.webapp:
+        # Start web application server
+        try:
+            from .webapp_server import run_server
+            run_server(shell, host=args.webapp_host, port=args.webapp_port)
+        except ImportError as e:
+            sys.stderr.write(f"Error: Web app dependencies not installed.\n")
+            sys.stderr.write(f"Install with: uv sync --extra webapp\n")
+            sys.exit(1)
+        except Exception as e:
+            sys.stderr.write(f"Error starting web app: {e}\n")
+            sys.exit(1)
+        return
 
     # Determine mode of execution
     # Priority: -c flag > script file > command args > interactive
