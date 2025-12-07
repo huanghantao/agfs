@@ -151,13 +151,62 @@ def main():
         ], cwd=str(script_dir))
 
         # Install all agfs-shell dependencies from pyproject.toml (excluding pyagfs which we already copied)
+        # Including webapp dependencies for portable package
         subprocess.check_call([
             "uv", "pip", "install",
             "--target", str(lib_dir),
             "--python", sys.executable,
             "rich",
-            "jq"
+            "jq",
+            "aiohttp>=3.9.0",
+            "aiohttp-cors>=0.7.0"
         ], cwd=str(script_dir))
+
+        # Build and copy webapp
+        print("Building webapp...")
+        webapp_src_dir = script_dir / "webapp"
+        webapp_dist_dir = webapp_src_dir / "dist"
+
+        # Check if npm is available
+        has_npm = shutil.which("npm") is not None
+
+        if has_npm and webapp_src_dir.exists():
+            try:
+                # Install webapp dependencies
+                print("  Installing webapp dependencies...")
+                subprocess.check_call(
+                    ["npm", "install"],
+                    cwd=str(webapp_src_dir),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE
+                )
+
+                # Build webapp
+                print("  Building webapp frontend...")
+                subprocess.check_call(
+                    ["npm", "run", "build"],
+                    cwd=str(webapp_src_dir),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE
+                )
+
+                # Copy built webapp to portable package
+                if webapp_dist_dir.exists():
+                    target_webapp_dir = lib_dir / "webapp" / "dist"
+                    print(f"  Copying webapp to {target_webapp_dir}...")
+                    shutil.copytree(webapp_dist_dir, target_webapp_dir)
+                    print("  ✓ Webapp built and copied successfully")
+                else:
+                    print("  Warning: Webapp build output not found at", webapp_dist_dir)
+            except subprocess.CalledProcessError as e:
+                print(f"  Warning: Failed to build webapp: {e}")
+                print("  The portable package will not include webapp support")
+        else:
+            if not has_npm:
+                print("  Warning: npm not found, skipping webapp build")
+            if not webapp_src_dir.exists():
+                print("  Warning: webapp directory not found, skipping webapp build")
+            print("  The portable package will not include webapp support")
 
         # Create launcher script
         print("Creating launcher scripts...")
@@ -208,14 +257,17 @@ Built: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 Git: {get_git_hash()}
 
 This is a portable distribution of agfs-shell that includes all dependencies
-in a bundled library directory.
+in a bundled library directory, including web app support.
 
 Requirements:
 - Python 3.8 or higher on the system
 - No additional Python packages needed
+- Node.js/npm is NOT required (webapp is pre-built)
 
 Usage:
-  ./agfs-shell
+  ./agfs-shell                              # Start interactive shell
+  ./agfs-shell --webapp                     # Start web app (default: localhost:3000)
+  ./agfs-shell --webapp --webapp-port 8000  # Use custom port
 
 Installation:
   You can move this entire directory anywhere and run ./agfs-shell directly.
@@ -224,8 +276,12 @@ Installation:
 Environment Variables:
   AGFS_API_URL - Override default API endpoint (default: http://localhost:8080/api/v1)
 
-Example:
+Examples:
+  # Start with remote server
   AGFS_API_URL=http://remote-server:8080/api/v1 ./agfs-shell
+
+  # Start web app on all interfaces
+  ./agfs-shell --webapp --webapp-host 0.0.0.0 --webapp-port 3000
 """)
 
         # Calculate size

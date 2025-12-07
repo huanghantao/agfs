@@ -9,7 +9,7 @@ resolution-markers = [
 
 [[package]]
 name = "agfs-shell"
-version = "1.1.2"
+version = "1.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "jq" },
@@ -1423,7 +1423,7 @@ wheels = [
 
 [[package]]
 name = "pyagfs"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "../agfs-sdk/python" }
 dependencies = [
     { name = "requests", version = "2.32.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
