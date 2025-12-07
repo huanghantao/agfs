@@ -427,8 +427,12 @@ func (wfs *WASMFileSystem) RemoveAll(path string) error {
 }
 
 func (wfs *WASMFileSystem) Read(path string, offset int64, size int64) ([]byte, error) {
-	wfs.mu.Lock()
-	defer wfs.mu.Unlock()
+	// Only lock if mutex is not nil (for backward compatibility)
+	// Pooled instances don't need mutex as they're single-threaded
+	if wfs.mu != nil {
+		wfs.mu.Lock()
+		defer wfs.mu.Unlock()
+	}
 
 	readFunc := wfs.module.ExportedFunction("fs_read")
 	if readFunc == nil {
