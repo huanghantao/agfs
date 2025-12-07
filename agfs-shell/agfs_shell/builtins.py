@@ -3258,7 +3258,7 @@ def cmd_llm(process: Process) -> int:
             full_prompt = "Describe this image"
     elif stdin_text and prompt_text:
         # Both text stdin and prompt: stdin is context, prompt is the question/instruction
-        full_prompt = f"{stdin_text}\n\n{prompt_text}"
+        full_prompt = f"{stdin_text}\n\n===\n\n{prompt_text}"
     elif stdin_text:
         # Only text stdin: use it as the prompt
         full_prompt = stdin_text
