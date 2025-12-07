@@ -202,6 +202,26 @@ T* PluginInstance<T>::instance = nullptr;
         return nullptr; \
     } \
     \
+    /* Shared memory buffers for zero-copy optimization */ \
+    static constexpr size_t SHARED_BUFFER_SIZE = 65536; /* 64KB */ \
+    static uint8_t input_buffer[SHARED_BUFFER_SIZE]; \
+    static uint8_t output_buffer[SHARED_BUFFER_SIZE]; \
+    \
+    __attribute__((export_name("get_input_buffer_ptr"))) \
+    uint8_t* get_input_buffer_ptr() { \
+        return input_buffer; \
+    } \
+    \
+    __attribute__((export_name("get_output_buffer_ptr"))) \
+    uint8_t* get_output_buffer_ptr() { \
+        return output_buffer; \
+    } \
+    \
+    __attribute__((export_name("get_shared_buffer_size"))) \
+    uint32_t get_shared_buffer_size() { \
+        return SHARED_BUFFER_SIZE; \
+    } \
+    \
     } /* extern "C" */
 
 #endif // AGFS_EXPORT_H

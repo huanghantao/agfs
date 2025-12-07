@@ -29,9 +29,10 @@ type PooledWASMFileSystem struct {
 // WASMFileSystem implements filesystem.FileSystem by delegating to WASM functions
 // This version is used for individual instances within the pool
 type WASMFileSystem struct {
-	ctx    context.Context
-	module wazeroapi.Module
-	mu     *sync.Mutex // Mutex for single instance (can be nil if instance is not shared)
+	ctx          context.Context
+	module       wazeroapi.Module
+	sharedBuffer *SharedBufferInfo // Shared memory buffer info (can be nil)
+	mu           *sync.Mutex       // Mutex for single instance (can be nil if instance is not shared)
 }
 
 // NewWASMPluginWithPool creates a new WASM plugin wrapper with an instance pool
@@ -338,11 +339,11 @@ func (wfs *WASMFileSystem) Create(path string) error {
 		return fmt.Errorf("fs_create not implemented")
 	}
 
-	pathPtr, pathPtrSize, err := writeStringToMemory(wfs.module, path)
+	pathPtr, pathPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, path, wfs.sharedBuffer)
 	if err != nil {
 		return err
 	}
-	defer freeWASMMemory(wfs.module, pathPtr, pathPtrSize)
+	defer freeWASMMemoryWithBuffer(wfs.module, pathPtr, pathPtrSize, wfs.sharedBuffer)
 
 	results, err := createFunc.Call(wfs.ctx, uint64(pathPtr))
 	if err != nil {
@@ -466,11 +467,11 @@ func (wfs *WASMFileSystem) Read(path string, offset int64, size int64) ([]byte, 
 		return nil, fmt.Errorf("fs_read not implemented")
 	}
 
-	pathPtr, pathPtrSize, err := writeStringToMemory(wfs.module, path)
+	pathPtr, pathPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, path, wfs.sharedBuffer)
 	if err != nil {
 		return nil, err
 	}
-	defer freeWASMMemory(wfs.module, pathPtr, pathPtrSize)
+	defer freeWASMMemoryWithBuffer(wfs.module, pathPtr, pathPtrSize, wfs.sharedBuffer)
 
 	results, err := readFunc.Call(wfs.ctx, uint64(pathPtr), uint64(offset), uint64(size))
 	if err != nil {
@@ -508,17 +509,17 @@ func (wfs *WASMFileSystem) Write(path string, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("fs_write not implemented")
 	}
 
-	pathPtr, pathPtrSize, err := writeStringToMemory(wfs.module, path)
+	pathPtr, pathPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, path, wfs.sharedBuffer)
 	if err != nil {
 		return nil, err
 	}
-	defer freeWASMMemory(wfs.module, pathPtr, pathPtrSize)
+	defer freeWASMMemoryWithBuffer(wfs.module, pathPtr, pathPtrSize, wfs.sharedBuffer)
 
-	dataPtr, dataPtrSize, err := writeBytesToMemory(wfs.module, data)
+	dataPtr, dataPtrSize, err := writeBytesToMemoryWithBuffer(wfs.module, data, wfs.sharedBuffer)
 	if err != nil {
 		return nil, err
 	}
-	defer freeWASMMemory(wfs.module, dataPtr, dataPtrSize)
+	defer freeWASMMemoryWithBuffer(wfs.module, dataPtr, dataPtrSize, wfs.sharedBuffer)
 
 	results, err := writeFunc.Call(wfs.ctx, uint64(pathPtr), uint64(dataPtr), uint64(len(data)))
 	if err != nil {
@@ -615,12 +616,12 @@ func (wfs *WASMFileSystem) Stat(path string) (*filesystem.FileInfo, error) {
 		return nil, fmt.Errorf("fs_stat not implemented")
 	}
 
-	pathPtr, pathPtrSize, err := writeStringToMemory(wfs.module, path)
+	pathPtr, pathPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, path, wfs.sharedBuffer)
 	if err != nil {
 		log.Errorf("Failed to write path to memory: %v", err)
 		return nil, err
 	}
-	defer freeWASMMemory(wfs.module, pathPtr, pathPtrSize)
+	defer freeWASMMemoryWithBuffer(wfs.module, pathPtr, pathPtrSize, wfs.sharedBuffer)
 
 	log.Debugf("Calling fs_stat WASM function with pathPtr=%d", pathPtr)
 	results, err := statFunc.Call(wfs.ctx, uint64(pathPtr))
@@ -781,9 +782,21 @@ func (w *wasmWriteCloser) Close() error {
 // freeWASMMemory frees memory allocated in WASM module
 // Supports both standard free(ptr) and Rust-style free(ptr, size)
 // If size is 0, tries both calling conventions
+// Does not free memory from shared buffers
 func freeWASMMemory(module wazeroapi.Module, ptr uint32, size uint32) {
+	freeWASMMemoryWithBuffer(module, ptr, size, nil)
+}
+
+func freeWASMMemoryWithBuffer(module wazeroapi.Module, ptr uint32, size uint32, bufInfo *SharedBufferInfo) {
 	if ptr == 0 {
 		return
+	}
+
+	// Don't free shared buffer memory
+	if bufInfo != nil && bufInfo.Enabled {
+		if ptr == bufInfo.InputBufferPtr || ptr == bufInfo.OutputBufferPtr {
+			return // This is shared buffer memory, don't free
+		}
 	}
 
 	freeFunc := module.ExportedFunction("free")
@@ -850,13 +863,27 @@ func readStringFromMemory(module wazeroapi.Module, ptr uint32) (string, bool) {
 }
 
 func writeStringToMemory(module wazeroapi.Module, s string) (ptr uint32, size uint32, err error) {
-	// Allocate memory in WASM module
+	return writeStringToMemoryWithBuffer(module, s, nil)
+}
+
+func writeStringToMemoryWithBuffer(module wazeroapi.Module, s string, bufInfo *SharedBufferInfo) (ptr uint32, size uint32, err error) {
+	size = uint32(len(s) + 1) // +1 for null terminator
+	data := append([]byte(s), 0)
+
+	// Try to use shared buffer if available and data fits
+	if bufInfo != nil && bufInfo.Enabled && size <= bufInfo.BufferSize {
+		mem := module.Memory()
+		if mem.Write(bufInfo.InputBufferPtr, data) {
+			return bufInfo.InputBufferPtr, size, nil
+		}
+	}
+
+	// Fall back to malloc for large data or if shared buffer not available
 	allocFunc := module.ExportedFunction("malloc")
 	if allocFunc == nil {
 		return 0, 0, fmt.Errorf("malloc function not found in WASM module")
 	}
 
-	size = uint32(len(s) + 1) // +1 for null terminator
 	results, callErr := allocFunc.Call(context.Background(), uint64(size))
 	if callErr != nil {
 		return 0, 0, fmt.Errorf("malloc failed: %w", callErr)
@@ -873,7 +900,6 @@ func writeStringToMemory(module wazeroapi.Module, s string) (ptr uint32, size ui
 
 	// Write string to memory
 	mem := module.Memory()
-	data := append([]byte(s), 0) // Add null terminator
 	if !mem.Write(ptr, data) {
 		return 0, 0, fmt.Errorf("failed to write string to memory")
 	}
@@ -882,13 +908,26 @@ func writeStringToMemory(module wazeroapi.Module, s string) (ptr uint32, size ui
 }
 
 func writeBytesToMemory(module wazeroapi.Module, data []byte) (ptr uint32, size uint32, err error) {
-	// Allocate memory in WASM module
+	return writeBytesToMemoryWithBuffer(module, data, nil)
+}
+
+func writeBytesToMemoryWithBuffer(module wazeroapi.Module, data []byte, bufInfo *SharedBufferInfo) (ptr uint32, size uint32, err error) {
+	size = uint32(len(data))
+
+	// Try to use shared buffer if available and data fits
+	if bufInfo != nil && bufInfo.Enabled && size <= bufInfo.BufferSize {
+		mem := module.Memory()
+		if mem.Write(bufInfo.InputBufferPtr, data) {
+			return bufInfo.InputBufferPtr, size, nil
+		}
+	}
+
+	// Fall back to malloc for large data or if shared buffer not available
 	allocFunc := module.ExportedFunction("malloc")
 	if allocFunc == nil {
 		return 0, 0, fmt.Errorf("malloc function not found in WASM module")
 	}
 
-	size = uint32(len(data))
 	results, callErr := allocFunc.Call(context.Background(), uint64(size))
 	if callErr != nil {
 		return 0, 0, fmt.Errorf("malloc failed: %w", callErr)

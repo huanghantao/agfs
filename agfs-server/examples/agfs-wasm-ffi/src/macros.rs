@@ -273,7 +273,31 @@ macro_rules! export_plugin {
             }
         }
 
-        // Export malloc and free for Go compatibility
+        // Shared memory buffers for zero-copy optimization
+        // Each buffer is 64KB by default
+        const SHARED_BUFFER_SIZE: usize = 65536;
+        static mut INPUT_BUFFER: [u8; SHARED_BUFFER_SIZE] = [0; SHARED_BUFFER_SIZE];
+        static mut OUTPUT_BUFFER: [u8; SHARED_BUFFER_SIZE] = [0; SHARED_BUFFER_SIZE];
+
+        /// Get pointer to input buffer (Go -> WASM)
+        #[no_mangle]
+        pub extern "C" fn get_input_buffer_ptr() -> *mut u8 {
+            unsafe { INPUT_BUFFER.as_mut_ptr() }
+        }
+
+        /// Get pointer to output buffer (WASM -> Go)
+        #[no_mangle]
+        pub extern "C" fn get_output_buffer_ptr() -> *mut u8 {
+            unsafe { OUTPUT_BUFFER.as_mut_ptr() }
+        }
+
+        /// Get shared buffer size
+        #[no_mangle]
+        pub extern "C" fn get_shared_buffer_size() -> u32 {
+            SHARED_BUFFER_SIZE as u32
+        }
+
+        // Export malloc and free for Go compatibility (fallback for large data)
         #[no_mangle]
         pub extern "C" fn malloc(size: usize) -> *mut u8 {
             use std::alloc::{alloc, Layout};

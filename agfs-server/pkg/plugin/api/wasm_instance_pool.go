@@ -18,6 +18,7 @@ type PoolConfig struct {
 	InstanceMaxLifetime time.Duration // Maximum instance lifetime (0 = unlimited)
 	InstanceMaxRequests int64         // Maximum requests per instance (0 = unlimited)
 	HealthCheckInterval time.Duration // Health check interval (0 = disabled)
+	AcquireTimeout      time.Duration // Timeout for acquiring instance (0 = unlimited, default 30s)
 	EnableStatistics    bool          // Enable statistics collection
 }
 
@@ -47,10 +48,19 @@ type PoolStats struct {
 	mu             sync.Mutex
 }
 
+// SharedBufferInfo holds information about shared memory buffers
+type SharedBufferInfo struct {
+	InputBufferPtr  uint32 // Pointer to input buffer (Go -> WASM)
+	OutputBufferPtr uint32 // Pointer to output buffer (WASM -> Go)
+	BufferSize      uint32 // Size of each buffer
+	Enabled         bool   // Whether shared buffers are available
+}
+
 // WASMModuleInstance represents a single WASM module instance
 type WASMModuleInstance struct {
 	module       wazeroapi.Module
 	fileSystem   *WASMFileSystem
+	sharedBuffer SharedBufferInfo
 	createdAt    time.Time
 	requestCount int64 // Number of requests handled by this instance
 	mu           sync.Mutex
@@ -63,6 +73,9 @@ func NewWASMInstancePool(ctx context.Context, runtime wazero.Runtime, compiledMo
 	// Apply defaults
 	if config.MaxInstances <= 0 {
 		config.MaxInstances = 10 // default to 10 concurrent instances
+	}
+	if config.AcquireTimeout == 0 {
+		config.AcquireTimeout = 30 * time.Second // default to 30 second timeout
 	}
 
 	pool := &WASMInstancePool{
@@ -144,11 +157,24 @@ func (p *WASMInstancePool) Acquire() (*WASMModuleInstance, error) {
 			p.currentInstances--
 			p.mu.Unlock()
 
+			if p.config.EnableStatistics {
+				p.stats.mu.Lock()
+				p.stats.TotalDestroyed++
+				p.stats.CurrentActive--
+				p.stats.mu.Unlock()
+			}
+
 			// Create a new instance to replace the recycled one
 			return p.Acquire()
 		}
 
 		log.Debugf("Reusing WASM instance from pool for %s", p.pluginName)
+
+		// Increment request count for this instance
+		instance.mu.Lock()
+		instance.requestCount++
+		instance.mu.Unlock()
+
 		return instance, nil
 	default:
 		// No available instance, try to create a new one
@@ -183,6 +209,12 @@ func (p *WASMInstancePool) Acquire() (*WASMModuleInstance, error) {
 
 			log.Debugf("Created new WASM instance for %s (total: %d/%d)",
 				p.pluginName, p.currentInstances, p.config.MaxInstances)
+
+			// Increment request count for this instance
+			instance.mu.Lock()
+			instance.requestCount++
+			instance.mu.Unlock()
+
 			return instance, nil
 		}
 
@@ -194,7 +226,19 @@ func (p *WASMInstancePool) Acquire() (*WASMModuleInstance, error) {
 			p.stats.mu.Unlock()
 		}
 
-		instance := <-p.instances
+		// Wait with timeout to prevent deadlock
+		var instance *WASMModuleInstance
+		select {
+		case instance = <-p.instances:
+			// Got an instance
+		case <-time.After(p.config.AcquireTimeout):
+			if p.config.EnableStatistics {
+				p.stats.mu.Lock()
+				p.stats.FailedRequests++
+				p.stats.mu.Unlock()
+			}
+			return nil, fmt.Errorf("timeout waiting for available WASM instance after %v", p.config.AcquireTimeout)
+		}
 
 		// Check if instance needs to be recycled
 		if p.shouldRecycleInstance(instance) {
@@ -205,9 +249,21 @@ func (p *WASMInstancePool) Acquire() (*WASMModuleInstance, error) {
 			p.currentInstances--
 			p.mu.Unlock()
 
+			if p.config.EnableStatistics {
+				p.stats.mu.Lock()
+				p.stats.TotalDestroyed++
+				p.stats.CurrentActive--
+				p.stats.mu.Unlock()
+			}
+
 			// Create a new instance to replace the recycled one
 			return p.Acquire()
 		}
+
+		// Increment request count for this instance
+		instance.mu.Lock()
+		instance.requestCount++
+		instance.mu.Unlock()
 
 		return instance, nil
 	}
@@ -278,17 +334,69 @@ func (p *WASMInstancePool) createInstance() (*WASMModuleInstance, error) {
 		}
 	}
 
+	// Initialize shared buffer info
+	sharedBuffer := initializeSharedBuffer(module, p.ctx)
+
 	instance := &WASMModuleInstance{
-		module:    module,
-		createdAt: time.Now(),
+		module:       module,
+		createdAt:    time.Now(),
+		sharedBuffer: sharedBuffer,
 		fileSystem: &WASMFileSystem{
-			ctx:    p.ctx,
-			module: module,
-			mu:     nil, // No mutex needed - each instance is single-threaded
+			ctx:          p.ctx,
+			module:       module,
+			sharedBuffer: &sharedBuffer,
+			mu:           nil, // No mutex needed - each instance is single-threaded
 		},
 	}
 
+	if sharedBuffer.Enabled {
+		log.Debugf("Shared buffers enabled for %s: input=%d, output=%d, size=%d",
+			p.pluginName, sharedBuffer.InputBufferPtr, sharedBuffer.OutputBufferPtr, sharedBuffer.BufferSize)
+	}
+
 	return instance, nil
+}
+
+// initializeSharedBuffer detects and initializes shared memory buffers
+func initializeSharedBuffer(module wazeroapi.Module, ctx context.Context) SharedBufferInfo {
+	info := SharedBufferInfo{Enabled: false}
+
+	// Try to get shared buffer functions
+	getInputBufFunc := module.ExportedFunction("get_input_buffer_ptr")
+	getOutputBufFunc := module.ExportedFunction("get_output_buffer_ptr")
+	getBufSizeFunc := module.ExportedFunction("get_shared_buffer_size")
+
+	// All three functions must be available
+	if getInputBufFunc == nil || getOutputBufFunc == nil || getBufSizeFunc == nil {
+		log.Debug("Shared buffers not available (functions not exported)")
+		return info
+	}
+
+	// Get buffer pointers and size
+	inputResults, err := getInputBufFunc.Call(ctx)
+	if err != nil || len(inputResults) == 0 {
+		log.Warnf("Failed to get input buffer pointer: %v", err)
+		return info
+	}
+
+	outputResults, err := getOutputBufFunc.Call(ctx)
+	if err != nil || len(outputResults) == 0 {
+		log.Warnf("Failed to get output buffer pointer: %v", err)
+		return info
+	}
+
+	sizeResults, err := getBufSizeFunc.Call(ctx)
+	if err != nil || len(sizeResults) == 0 {
+		log.Warnf("Failed to get buffer size: %v", err)
+		return info
+	}
+
+	info.InputBufferPtr = uint32(inputResults[0])
+	info.OutputBufferPtr = uint32(outputResults[0])
+	info.BufferSize = uint32(sizeResults[0])
+	info.Enabled = true
+
+	return info
 }
 
 // destroyInstance destroys a WASM module instance
