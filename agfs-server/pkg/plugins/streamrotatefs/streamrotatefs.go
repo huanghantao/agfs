@@ -671,6 +671,11 @@ func (srf *StreamRotateFS) OpenWrite(path string) (io.WriteCloser, error) {
 
 // OpenStream implements filesystem.Streamer interface
 func (srf *StreamRotateFS) OpenStream(path string) (filesystem.StreamReader, error) {
+	// README is not a streamable file
+	if path == "/README" {
+		return nil, fmt.Errorf("README is not a streamable file, use regular read mode")
+	}
+
 	srf.mu.Lock()
 	stream, exists := srf.streams[path]
 	if !exists {
