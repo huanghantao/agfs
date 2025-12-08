@@ -7,6 +7,7 @@ A tribute to Plan9, but in RESTful APIs.
 
 The motivation for this project is that I wanted to find a unified way to coordinate and orchestrate multiple AI agents in a distributed environment. 
 In the end, I realized that bash + filesystem is actually the best solution, e.g. some interesting patterns like `task_loop`:
+
 [https://github.com/c4pt0r/agfs/blob/master/agfs-mcp/demos/task_loop.py](https://github.com/c4pt0r/agfs/blob/master/agfs-mcp/demos/task_loop.py)
 
 
@@ -146,6 +147,7 @@ agfs:/>
 See more details in:
 - [agfs-shell/README.md](https://github.com/c4pt0r/agfs/blob/master/agfs-shell/README.md)
 - [agfs-server/README.md](https://github.com/c4pt0r/agfs/blob/master/agfs-server/README.md)
+
 
 
 
