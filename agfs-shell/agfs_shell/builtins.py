@@ -2,7 +2,7 @@
 
 import re
 import os
-import subprocess
+import datetime
 from typing import List
 from .process import Process
 from .command_decorators import command
@@ -3191,32 +3191,66 @@ def cmd_mount(process: Process) -> int:
 @command()
 def cmd_date(process: Process) -> int:
     """
-    Display or set the system date and time by calling the system date command
+    Display current date and time (pure Python implementation)
 
-    Usage: date [OPTION]... [+FORMAT]
+    Usage: date [+FORMAT]
 
-    All arguments are passed directly to the system date command.
+    Examples:
+        date                          # Wed Dec  6 10:23:45 PST 2025
+        date "+%Y-%m-%d"              # 2025-12-06
+        date "+%Y-%m-%d %H:%M:%S"     # 2025-12-06 10:23:45
+        date "+%H:%M:%S"              # 10:23:45
+
+    Format directives:
+        %Y - Year with century (2025)
+        %y - Year without century (25)
+        %m - Month (01-12)
+        %B - Full month name (December)
+        %b - Abbreviated month name (Dec)
+        %d - Day of month (01-31)
+        %e - Day of month, space-padded ( 1-31)
+        %A - Full weekday name (Wednesday)
+        %a - Abbreviated weekday name (Wed)
+        %H - Hour (00-23)
+        %I - Hour (01-12)
+        %M - Minute (00-59)
+        %S - Second (00-59)
+        %p - AM/PM
+        %Z - Timezone name
+        %z - Timezone offset (+0800)
     """
     try:
-        # Call the system date command with all provided arguments
-        result = subprocess.run(
-            ['date'] + process.args,
-            capture_output=True,
-            text=False  # Use bytes mode to preserve encoding
-        )
+        now = datetime.datetime.now()
 
-        # Write stdout from date command to process stdout
-        if result.stdout:
-            process.stdout.write(result.stdout)
+        if len(process.args) == 0:
+            # Default format: "Wed Dec  6 10:23:45 PST 2025"
+            # Note: %Z might be empty on some systems, %z gives offset
+            formatted = now.strftime("%a %b %e %H:%M:%S %Z %Y")
+            # Clean up double spaces that might occur
+            formatted = ' '.join(formatted.split())
+        elif len(process.args) == 1:
+            format_str = process.args[0]
 
-        # Write stderr from date command to process stderr
-        if result.stderr:
-            process.stderr.write(result.stderr)
+            # Remove leading '+' if present (like date +"%Y-%m-%d")
+            if format_str.startswith('+'):
+                format_str = format_str[1:]
 
-        return result.returncode
-    except FileNotFoundError:
-        process.stderr.write(b"date: command not found\n")
-        return 127
+            # Remove quotes if present
+            format_str = format_str.strip('"').strip("'")
+
+            # Apply the format
+            formatted = now.strftime(format_str)
+        else:
+            process.stderr.write(b"date: too many arguments\n")
+            process.stderr.write(b"Usage: date [+FORMAT]\n")
+            return 1
+
+        # Write output
+        process.stdout.write(formatted.encode('utf-8'))
+        process.stdout.write(b'\n')
+
+        return 0
+
     except Exception as e:
         process.stderr.write(f"date: error: {str(e)}\n".encode('utf-8'))
         return 1
