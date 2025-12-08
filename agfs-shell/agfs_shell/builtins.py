@@ -3316,6 +3316,30 @@ def cmd_llm(process: Process) -> int:
 
 
 @command()
+def cmd_true(process: Process) -> int:
+    """
+    Return success (exit code 0)
+
+    Usage: true
+
+    Always returns 0 (success). Useful in scripts and conditionals.
+    """
+    return 0
+
+
+@command()
+def cmd_false(process: Process) -> int:
+    """
+    Return failure (exit code 1)
+
+    Usage: false
+
+    Always returns 1 (failure). Useful in scripts and conditionals.
+    """
+    return 1
+
+
+@command()
 def cmd_local(process: Process) -> int:
     """
     Declare local variables (only valid within functions)
@@ -3437,6 +3461,8 @@ BUILTINS = {
     'continue': cmd_continue,
     'local': cmd_local,
     'return': cmd_return,
+    'true': cmd_true,
+    'false': cmd_false,
     '?': cmd_help,
     'help': cmd_help,
 }

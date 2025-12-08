@@ -62,14 +62,42 @@ class Shell:
 
         # Parse and execute the command, capturing stdout
         try:
-            # Expand variables in the command first
-            # But skip command substitution expansion to avoid infinite recursion
-            command = self._expand_variables_without_command_sub(command)
+            # Expand variables AND arithmetic, but handle command substitution carefully
+            # We need full expansion for the command
+            command = self._expand_variables(command)
 
             # Parse the command
             commands, redirections = self.parser.parse_command_line(command)
             if not commands:
                 return ''
+
+            # Check if this is a user-defined function call (single command only)
+            if len(commands) == 1:
+                cmd, args = commands[0]
+                if cmd in self.functions:
+                    # Execute the function and capture all its output
+                    # We'll redirect stdout to capture all output from the function
+                    import sys
+                    import io
+
+                    # Save real stdout
+                    old_stdout = sys.stdout
+                    sys.stdout = io.StringIO()
+
+                    try:
+                        # Execute the function normally
+                        exit_code = self.execute_function(cmd, args)
+
+                        # Get all captured output
+                        output = sys.stdout.getvalue()
+                        # Remove trailing newline if present
+                        if output.endswith('\n'):
+                            output = output[:-1]
+                        return output
+
+                    finally:
+                        # Restore stdout
+                        sys.stdout = old_stdout
 
             # Build processes for each command (simplified, no redirections)
             processes = []
@@ -200,6 +228,12 @@ class Shell:
         if local and self.local_scopes:
             # Set in current local scope
             self.local_scopes[-1][var_name] = value
+            # Also set in env with _local_ prefix for compatibility
+            self.env[f'_local_{var_name}'] = value
+        elif self.env.get('_function_depth') and f'_local_{var_name}' in self.env:
+            # We're in a function and this variable was declared local
+            # Update the local variable, not the global one
+            self.env[f'_local_{var_name}'] = value
         else:
             # Set in global env
             self.env[var_name] = value
@@ -472,7 +506,7 @@ class Shell:
                 # First, expand $VAR (with dollar sign)
                 for var_match in re.finditer(r'\$([A-Za-z_][A-Za-z0-9_]*)', expr):
                     var_name = var_match.group(1)
-                    var_value = self.env.get(var_name, '0')
+                    var_value = self._get_variable(var_name) or '0'
                     # Try to convert to int, default to 0 if not numeric
                     try:
                         int(var_value)
@@ -488,8 +522,9 @@ class Shell:
                     # Skip Python keywords
                     if var_name in ['and', 'or', 'not', 'in', 'is']:
                         continue
-                    if var_name in self.env:
-                        var_value = self.env.get(var_name, '0')
+                    # Check if variable exists (in local or global scope)
+                    var_value = self._get_variable(var_name)
+                    if var_value:
                         # Try to convert to int, default to 0 if not numeric
                         try:
                             int(var_value)
@@ -1224,8 +1259,47 @@ class Shell:
         # Execute function body
         last_exit_code = 0
         try:
-            for cmd in func_def['body']:
+            i = 0
+            while i < len(func_def['body']):
+                cmd = func_def['body'][i]
                 last_exit_code = self.execute(cmd)
+
+                # Handle multi-line constructs
+                if last_exit_code == EXIT_CODE_IF_STATEMENT_NEEDED:
+                    # Collect if/then/else/fi statement
+                    if_lines = [cmd]
+                    if_depth = 1
+                    i += 1
+                    while i < len(func_def['body']):
+                        next_line = func_def['body'][i]
+                        if_lines.append(next_line)
+                        next_line_stripped = self._strip_comment(next_line).strip()
+                        if next_line_stripped.startswith('if '):
+                            if_depth += 1
+                        elif next_line_stripped == 'fi':
+                            if_depth -= 1
+                            if if_depth == 0:
+                                break
+                        i += 1
+                    last_exit_code = self.execute_if_statement(if_lines)
+
+                elif last_exit_code == EXIT_CODE_FOR_LOOP_NEEDED:
+                    # Collect for/do/done loop
+                    for_lines = [cmd]
+                    for_depth = 1
+                    i += 1
+                    while i < len(func_def['body']):
+                        next_line = func_def['body'][i]
+                        for_lines.append(next_line)
+                        next_line_stripped = self._strip_comment(next_line).strip()
+                        if next_line_stripped.startswith('for '):
+                            for_depth += 1
+                        elif next_line_stripped == 'done':
+                            for_depth -= 1
+                            if for_depth == 0:
+                                break
+                        i += 1
+                    last_exit_code = self.execute_for_loop(for_lines)
 
                 # Check for return
                 if last_exit_code == EXIT_CODE_RETURN:
@@ -1238,6 +1312,8 @@ class Shell:
                     self.console.print(f"[red]{func_name}: break/continue outside loop[/red]", highlight=False)
                     last_exit_code = 1
                     break
+
+                i += 1
 
         finally:
             # Remove local scope
@@ -1377,6 +1453,47 @@ class Shell:
 
         # Expand variables in command line
         command_line = self._expand_variables(command_line)
+
+        # Handle && and || operators (conditional execution)
+        # Split by && and || while preserving which operator was used
+        if '&&' in command_line or '||' in command_line:
+            # Parse conditional chains: cmd1 && cmd2 || cmd3
+            # We need to respect operator precedence and short-circuit evaluation
+            parts = []
+            operators = []
+            current = []
+            i = 0
+            while i < len(command_line):
+                if i < len(command_line) - 1:
+                    two_char = command_line[i:i+2]
+                    if two_char == '&&' or two_char == '||':
+                        parts.append(''.join(current).strip())
+                        operators.append(two_char)
+                        current = []
+                        i += 2
+                        continue
+                current.append(command_line[i])
+                i += 1
+            if current:
+                parts.append(''.join(current).strip())
+
+            # Execute with short-circuit evaluation
+            if parts:
+                last_exit_code = self.execute(parts[0], stdin_data=stdin_data, heredoc_data=heredoc_data)
+                for i, op in enumerate(operators):
+                    if op == '&&':
+                        # Execute next only if previous succeeded
+                        if last_exit_code == 0:
+                            last_exit_code = self.execute(parts[i+1], stdin_data=None, heredoc_data=None)
+                        # else: skip execution, keep last_exit_code
+                    elif op == '||':
+                        # Execute next only if previous failed
+                        if last_exit_code != 0:
+                            last_exit_code = self.execute(parts[i+1], stdin_data=None, heredoc_data=None)
+                        else:
+                            # Previous succeeded, set exit code to 0 and don't execute next
+                            last_exit_code = 0
+                return last_exit_code
 
         # Parse the command line with redirections
         commands, redirections = self.parser.parse_command_line(command_line)

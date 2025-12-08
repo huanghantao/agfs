@@ -42,11 +42,13 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 **Key Features:**
 - Unix-style pipelines and redirection
 - Full scripting support with control flow
-- User-defined functions with local variables
+- User-defined functions with local variables (with some limitations)
 - AGFS integration for distributed file operations
 - Tab completion and command history
 - AI-powered command (llm integration)
 - Pure Python implementation (no subprocess for builtins)
+
+**Note:** This is an educational shell implementation. Advanced features like recursive functions require a full call stack implementation (future work).
 
 ## Features
 
@@ -59,18 +61,19 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 - **Command Substitution**: `$(command)` or backticks
 - **Glob Expansion**: `*.txt`, `file?.dat`, `[abc]`
 - **Control Flow**: `if/then/elif/else/fi` and `for/in/do/done`
-- **Functions**: User-defined functions with parameters and local variables
+- **Functions**: User-defined functions with parameters, local variables, and return values (non-recursive)
 - **Comments**: `#` and `//` style comments
 
-### Built-in Commands (39+)
+### Built-in Commands (41+)
 - **File Operations**: cd, pwd, ls, tree, cat, mkdir, touch, rm, mv, stat, cp, upload, download
 - **Text Processing**: echo, grep, jq, wc, head, tail, sort, uniq, tr, rev, cut
 - **Path Utilities**: basename, dirname
 - **Variables**: export, env, unset, local
 - **Testing**: test, [ ]
-- **Control Flow**: break, continue, exit, return
+- **Control Flow**: break, continue, exit, return, true, false
 - **Utilities**: sleep, date, plugins, mount, help
 - **AI**: llm (LLM integration)
+- **Operators**: `&&` (AND), `||` (OR) for conditional command execution
 
 ### Interactive Features
 - **Tab Completion**: Commands and file paths (AGFS-aware)
@@ -366,6 +369,35 @@ done
 # Output: 1, 2, 4, 5
 ```
 
+**Conditional Execution:**
+
+```bash
+# && operator - execute second command only if first succeeds
+test -f /local/file.txt && echo "File exists"
+
+# || operator - execute second command only if first fails
+test -f /local/missing.txt || echo "File not found"
+
+# Combining && and ||
+mkdir /local/data && echo "Created" || echo "Failed"
+
+# Short-circuit evaluation
+false && echo "Not executed"
+true || echo "Not executed"
+
+# Using true/false commands
+if true; then
+    echo "Always runs"
+fi
+
+if false; then
+    echo "Never runs"
+fi
+
+# Practical example: fallback chain
+command1 || command2 || command3 || echo "All failed"
+```
+
 ### Functions
 
 **Function Definition:**
@@ -388,13 +420,21 @@ greet() { echo "Hello, $1!"; }
 **Function Calls:**
 
 ```bash
-# Call with arguments
+# Direct function calls (fully supported)
 greet Alice           # $1 = Alice
 greet Bob Charlie     # $1 = Bob, $2 = Charlie
 
-# Use in command substitution
-result=$(add 5 3)
-echo "Result: $result"
+# Functions can call other functions
+outer() {
+    echo "Calling inner..."
+    inner
+}
+
+inner() {
+    echo "Inside inner function"
+}
+
+outer
 ```
 
 **Local Variables:**
@@ -445,46 +485,66 @@ show_args() {
 show_args apple banana cherry
 ```
 
-**Advanced Examples:**
+**Functions with Control Flow:**
 
 ```bash
-# Recursive function
-factorial() {
-    local n=$1
-    if [ $n -le 1 ]; then
-        echo 1
+# Functions with if/else
+check_file() {
+    if [ -f $1 ]; then
+        echo "File exists: $1"
+        return 0
     else
-        local prev=$(factorial $((n - 1)))
-        echo $((n * prev))
+        echo "File not found: $1"
+        return 1
     fi
 }
 
-result=$(factorial 5)
-echo "5! = $result"       # Prints: 5! = 120
-
-# Function composition
-add() { echo $((${1} + ${2})); }
-multiply() { echo $((${1} * ${2})); }
-
-compute() {
-    local sum=$(add $1 $2)
-    local product=$(multiply $sum $3)
-    echo $product
-}
-
-compute 5 3 4             # (5 + 3) * 4 = 32
+check_file /local/test.txt
 
 # Functions with loops
-process_files() {
-    for file in $@; do
-        if [ -f $file ]; then
-            echo "Processing: $file"
-            cat $file | wc -l
-        fi
+sum_numbers() {
+    local total=0
+    for num in $@; do
+        total=$((total + num))
     done
+    echo "Total: $total"
 }
 
-process_files /local/*.txt
+sum_numbers 1 2 3 4 5    # Total: 15
+
+# Functions with arithmetic
+calculate() {
+    local a=$1
+    local b=$2
+    local sum=$((a + b))
+    local product=$((a * b))
+    echo "Sum: $sum, Product: $product"
+}
+
+calculate 5 3            # Sum: 8, Product: 15
+```
+
+**Known Limitations:**
+
+```bash
+# ⚠️  Command substitution with functions has limited support
+# Simple cases work, but complex scenarios may not capture output correctly
+
+# ✓ This works
+simple_func() { echo "hello"; }
+result=$(simple_func)    # result="hello"
+
+# ✗ Recursive functions don't work (requires call stack implementation)
+factorial() {
+    if [ $1 -le 1 ]; then
+        echo 1
+    else
+        local prev=$(factorial $(($1 - 1)))  # ⚠️  Recursion not supported
+        echo $(($1 * prev))
+    fi
+}
+
+# Workaround: Use iterative approaches instead of recursion
 ```
 
 ### Heredoc
@@ -1608,8 +1668,7 @@ uv run pytest tests/test_builtins.py -v
 ./test_for_with_comment.agfsh
 
 # Run function tests
-./test_functions.as           # Basic function tests
-./test_functions_advanced.as  # Advanced function tests
+./test_functions_working.as      # Comprehensive test of all working features
 ```
 
 ### Manual Testing
@@ -1638,7 +1697,7 @@ agfs:/> echo "test" > /local/test.txt
 agfs:/> cat /local/test.txt
 
 # Test functions
-agfs:/> add() { echo $((${1} + ${2})); }
+agfs:/> add() { echo $(($1 + $2)); }
 agfs:/> add 5 3
 8
 
@@ -1675,6 +1734,44 @@ export AGFS_TIMEOUT=60
 uv run agfs-shell --timeout 60
 ```
 
+## Technical Limitations
+
+### Function Implementation
+
+The current function implementation supports:
+- ✅ Function definition and direct calls
+- ✅ Parameters (`$1`, `$2`, `$@`, etc.)
+- ✅ Local variables with `local` command
+- ✅ Return values with `return` command
+- ✅ Control flow (`if`, `for`) inside functions
+- ✅ Arithmetic expressions with local variables
+
+**Known Limitations:**
+- ⚠️  **Command substitution with functions**: Limited support due to output capture architecture
+- ❌ **Recursive functions**: Requires full call stack implementation (future enhancement)
+- ❌ **Complex nested command substitutions**: May not capture output correctly
+
+**Why these limitations exist:**
+
+The shell's current architecture executes commands through a Process/Pipeline system where each process has its own I/O streams. Capturing function output in command substitution contexts requires either:
+
+1. **Call Stack Implementation** (like real programming languages):
+   - Each function call gets its own execution frame
+   - Frames contain local variables, parameters, and output buffer
+   - Proper stack unwinding for recursion
+
+2. **Unified Output Capture**:
+   - Refactor `execute()` to support optional output capture mode
+   - All Process objects write to configurable output streams
+   - Capture and restore output contexts across call chain
+
+These are planned for Phase 2 of the implementation.
+
+**Workarounds:**
+- Use direct function calls instead of command substitution when possible
+- Use iterative approaches instead of recursion
+- Store results in global variables if needed
+
 ## Contributing
 
 This is an experimental/educational project. Contributions welcome!
@@ -1683,6 +1780,12 @@ This is an experimental/educational project. Contributions welcome!
 2. Create your feature branch
 3. Add tests for new features
 4. Submit a pull request
+
+**Areas for Contribution:**
+- Implement full call stack for recursive functions
+- Improve output capture mechanism
+- Add more built-in commands
+- Enhance error handling
 
 ## License
 
