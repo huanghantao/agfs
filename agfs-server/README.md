@@ -14,7 +14,58 @@ A Plugin-based RESTful file system server with a powerful plugin architecture th
 
 ## Quick Start
 
-### Build and Run
+### Using Docker (Recommended)
+
+The easiest way to get started is using Docker:
+
+1.  **Pull the image**:
+    ```bash
+    docker pull agfs/agfs-server:latest
+    ```
+
+2.  **Run the server with port mapping**:
+    ```bash
+    # Basic run - expose port 8080 to host
+    docker run -d -p 8080:8080 --name agfs-server agfs/agfs-server:latest
+
+    # With custom port mapping (host:container)
+    docker run -d -p 9000:8080 --name agfs-server agfs/agfs-server:latest
+
+    # With data persistence (mount /data directory)
+    docker run -d -p 8080:8080 -v $(pwd)/data:/data --name agfs-server agfs/agfs-server:latest
+
+    # With custom configuration
+    docker run -d -p 8080:8080 -v $(pwd)/config.yaml:/config.yaml --name agfs-server agfs/agfs-server:latest
+    ```
+
+3.  **Using agfs-shell inside the container**:
+
+    The Docker image includes `agfs-shell` for convenient file system operations.
+
+    ```bash
+    # Enter the container with interactive shell
+    docker exec -it agfs-server /bin/sh
+
+    # Inside the container, use agfs-shell
+    agfs-shell
+
+    # Or run agfs-shell commands directly
+    docker exec -it agfs-server agfs-shell -c "ls /"
+    docker exec -it agfs-server agfs-shell -c "cat /memfs/hello.txt"
+    ```
+
+4.  **Verify the server is running**:
+    ```bash
+    curl http://localhost:8080/api/v1/health
+    ```
+
+5.  **Stop and remove the container**:
+    ```bash
+    docker stop agfs-server
+    docker rm agfs-server
+    ```
+
+### Build and Run from Source
 
 1.  **Build the server**:
     ```bash
