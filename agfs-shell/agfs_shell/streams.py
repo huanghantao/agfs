@@ -88,7 +88,16 @@ class Stream:
         return None
 
     def get_value(self) -> bytes:
-        """Get the buffer contents (for buffer-based streams)"""
+        """
+        Get the buffer contents (for buffer-based streams).
+
+        NOTE: This method only works for buffer-based streams. For InputStream,
+        use read() or readlines() instead, as they properly support streaming
+        pipelines (StreamingInputStream reads from a queue, not a buffer).
+
+        This method is primarily intended for OutputStream/ErrorStream to
+        retrieve command output after execution.
+        """
         if self._buffer is not None:
             pos = self._buffer.tell()
             self._buffer.seek(0)
@@ -99,7 +108,13 @@ class Stream:
 
 
 class InputStream(Stream):
-    """Input stream (STDIN-like)"""
+    """
+    Input stream (STDIN-like).
+
+    To read data from an InputStream, always use read() or readlines() methods,
+    NOT get_value(). This ensures compatibility with streaming pipelines where
+    StreamingInputStream is used (which reads from a queue, not a buffer).
+    """
 
     def __init__(self, fd: Optional[Union[int, BinaryIO, TextIO]] = None):
         super().__init__(fd, mode='rb')
