@@ -122,6 +122,14 @@ def cmd_llm(process: Process) -> int:
     if not api_key:
         api_key = config.get('api_key')
 
+    # Set API key as environment variable (some model plugins don't support key= parameter)
+    if api_key:
+        import os
+        if 'gpt' in model_name.lower() or 'openai' in model_name.lower():
+            os.environ['OPENAI_API_KEY'] = api_key
+        elif 'claude' in model_name.lower() or 'anthropic' in model_name.lower():
+            os.environ['ANTHROPIC_API_KEY'] = api_key
+
     # Helper function to detect if binary data is an image
     def is_image(data):
         """Detect if binary data is an image by checking magic numbers"""
@@ -203,12 +211,10 @@ def cmd_llm(process: Process) -> int:
         process.stderr.write(error_msg.encode('utf-8'))
         return 1
 
-    # Prepare prompt kwargs
+    # Prepare prompt kwargs (don't pass key - use environment variable instead)
     prompt_kwargs = {}
     if system_prompt:
         prompt_kwargs['system'] = system_prompt
-    if api_key:
-        prompt_kwargs['key'] = api_key
     if attachments:
         prompt_kwargs['attachments'] = attachments
 
