@@ -181,17 +181,23 @@ func (fs *S3FS) Read(path string, offset int64, size int64) ([]byte, error) {
 	return plugin.ApplyRangeRead(data, offset, size)
 }
 
-func (fs *S3FS) Write(path string, data []byte) ([]byte, error) {
+func (fs *S3FS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	path = filesystem.NormalizeS3Key(path)
 	ctx := context.Background()
 
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
+	// S3 is an object store - it doesn't support offset writes
+	// Only full object replacement is supported
+	if offset >= 0 && offset != 0 {
+		return 0, fmt.Errorf("S3 does not support offset writes")
+	}
+
 	// Check if it's a directory
 	dirExists, _ := fs.client.DirectoryExists(ctx, path)
 	if dirExists {
-		return nil, fmt.Errorf("is a directory: %s", path)
+		return 0, fmt.Errorf("is a directory: %s", path)
 	}
 
 	// Check if parent directory exists
@@ -199,20 +205,20 @@ func (fs *S3FS) Write(path string, data []byte) ([]byte, error) {
 	if parent != "" {
 		parentExists, err := fs.client.DirectoryExists(ctx, parent)
 		if err != nil {
-			return nil, fmt.Errorf("failed to check parent directory: %w", err)
+			return 0, fmt.Errorf("failed to check parent directory: %w", err)
 		}
 		if !parentExists {
-			return nil, fmt.Errorf("parent directory does not exist: %s", parent)
+			return 0, fmt.Errorf("parent directory does not exist: %s", parent)
 		}
 	}
 
 	// Write to S3
 	err := fs.client.PutObject(ctx, path, data)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	return []byte(fmt.Sprintf("Written %d bytes to %s", len(data), path)), nil
+	return int64(len(data)), nil
 }
 
 func (fs *S3FS) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -401,7 +407,7 @@ func (w *s3fsWriter) Write(p []byte) (n int, err error) {
 }
 
 func (w *s3fsWriter) Close() error {
-	_, err := w.fs.Write(w.path, w.buf)
+	_, err := w.fs.Write(w.path, w.buf, -1, filesystem.WriteFlagCreate|filesystem.WriteFlagTruncate)
 	return err
 }
 

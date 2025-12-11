@@ -50,14 +50,14 @@ pub mod types;
 pub mod prelude {
     pub use crate::error::{FileSystemError, Result};
     pub use crate::filesystem::FileSystem;
-    pub use crate::types::{FileInfo, FileMetadata};
+    pub use crate::types::{FileInfo, FileMetadata, WriteFlag};
     pub use crate::export_plugin;
 }
 
 // Re-export main types
 pub use error::{FileSystemError, Result};
 pub use filesystem::FileSystem;
-pub use types::{FileInfo, FileMetadata};
+pub use types::{FileInfo, FileMetadata, WriteFlag};
 
 /// Macro to export a FileSystem implementation as a C-compatible plugin
 ///
@@ -195,14 +195,18 @@ macro_rules! export_plugin {
             $crate::ffi::fs_remove_all::<$fs_type>(plugin, path)
         }
 
+        /// Write to file with offset and flags
+        /// Returns i64: positive = bytes written, negative = error
         #[no_mangle]
         pub extern "C" fn FSWrite(
             plugin: *mut c_void,
             path: *const c_char,
             data: *const c_char,
             data_len: c_int,
-        ) -> *const c_char {
-            $crate::ffi::fs_write::<$fs_type>(plugin, path, data, data_len)
+            offset: i64,
+            flags: u32,
+        ) -> i64 {
+            $crate::ffi::fs_write::<$fs_type>(plugin, path, data, data_len, offset, flags)
         }
 
         #[no_mangle]

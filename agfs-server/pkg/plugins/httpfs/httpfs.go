@@ -455,8 +455,8 @@ func (fs *HTTPFS) Read(path string, offset int64, size int64) ([]byte, error) {
 	return nil, fmt.Errorf("httagfs is read-only via filesystem interface, use HTTP to access files")
 }
 
-func (fs *HTTPFS) Write(path string, data []byte) ([]byte, error) {
-	return nil, fmt.Errorf("httagfs is read-only via filesystem interface, use HTTP to access files")
+func (fs *HTTPFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
+	return 0, fmt.Errorf("httagfs is read-only via filesystem interface, use HTTP to access files")
 }
 
 func (fs *HTTPFS) ReadDir(path string) ([]filesystem.FileInfo, error) {

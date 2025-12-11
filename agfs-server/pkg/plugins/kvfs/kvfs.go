@@ -251,25 +251,26 @@ func (kvfs *kvFS) Read(path string, offset int64, size int64) ([]byte, error) {
 	return plugin.ApplyRangeRead(data, offset, size)
 }
 
-func (kvfs *kvFS) Write(path string, data []byte) ([]byte, error) {
+func (kvfs *kvFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	if path == "/" || path == "/keys" {
-		return nil, fmt.Errorf("cannot write to directory: %s", path)
+		return 0, fmt.Errorf("cannot write to directory: %s", path)
 	}
 
 	if !strings.HasPrefix(path, "/keys/") {
-		return nil, fmt.Errorf("keys must be under /keys/ directory")
+		return 0, fmt.Errorf("keys must be under /keys/ directory")
 	}
 
 	key := strings.TrimPrefix(path, "/keys/")
 	if key == "" {
-		return nil, fmt.Errorf("key name cannot be empty")
+		return 0, fmt.Errorf("key name cannot be empty")
 	}
 
 	kvfs.plugin.mu.Lock()
 	defer kvfs.plugin.mu.Unlock()
 
+	// KV store - offset writes not supported (full value replacement)
 	kvfs.plugin.store[key] = data
-	return nil, nil
+	return int64(len(data)), nil
 }
 
 func (kvfs *kvFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -445,7 +446,7 @@ func (kw *kvWriter) Write(p []byte) (n int, err error) {
 }
 
 func (kw *kvWriter) Close() error {
-	_, err := kw.kvfs.Write(kw.path, kw.buf.Bytes())
+	_, err := kw.kvfs.Write(kw.path, kw.buf.Bytes(), -1, filesystem.WriteFlagNone)
 	return err
 }
 

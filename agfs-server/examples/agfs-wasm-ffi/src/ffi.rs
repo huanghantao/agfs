@@ -4,7 +4,7 @@
 //! C-compatible types and safe Rust types.
 
 use crate::memory::{pack_u64, Buffer, CString};
-use crate::types::{Config, Error, FileInfo, Result};
+use crate::types::{Config, Error, FileInfo, Result, WriteFlag};
 use crate::FileSystem;
 
 /// Convert a Result to an error pointer (null = success)
@@ -100,23 +100,38 @@ pub fn handle_readdir<FS: FileSystem>(fs: &FS, path_ptr: *const u8) -> u64 {
 }
 
 /// Handle fs_write FFI call
+///
+/// # Arguments
+/// * `fs` - The filesystem
+/// * `path_ptr` - Pointer to path string
+/// * `data_ptr` - Pointer to data buffer
+/// * `size` - Size of data
+/// * `offset` - Write offset (-1 for append)
+/// * `flags` - Write flags (bitmask)
+///
+/// # Returns
+/// Packed u64: high 32 bits = bytes written (or 0 on error), low 32 bits = error ptr (or 0 on success)
 pub fn handle_write<FS: FileSystem>(
     fs: &mut FS,
     path_ptr: *const u8,
     data_ptr: *const u8,
     size: usize,
+    offset: i64,
+    flags: u32,
 ) -> u64 {
     let path = unsafe { CString::from_ptr(path_ptr) };
     let data = unsafe { std::slice::from_raw_parts(data_ptr, size) };
 
-    match fs.write(&path, data) {
-        Ok(response) => {
-            let len = response.len() as u32;
-            let buffer = Buffer::from_bytes(&response);
-            let ptr = buffer.into_raw() as u32;
-            pack_u64(ptr, len)
+    match fs.write(&path, data, offset, WriteFlag::from(flags)) {
+        Ok(bytes_written) => {
+            // Pack bytes_written in high 32 bits, 0 (no error) in low 32 bits
+            pack_u64(bytes_written as u32, 0)
         }
-        Err(_) => 0, // Return 0 to indicate error
+        Err(e) => {
+            // Pack 0 (no bytes written) in high bits, error pointer in low bits
+            let err_ptr = CString::new(&e.to_string()).into_raw();
+            pack_u64(0, err_ptr as u32)
+        }
     }
 }
 

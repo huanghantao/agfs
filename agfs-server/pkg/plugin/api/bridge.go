@@ -187,9 +187,9 @@ func (efs *ExternalFileSystem) Read(path string, offset int64, size int64) ([]by
 	return data, nil
 }
 
-func (efs *ExternalFileSystem) Write(path string, data []byte) ([]byte, error) {
+func (efs *ExternalFileSystem) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	if efs.vtable.FSWrite == nil {
-		return nil, fmt.Errorf("not implemented")
+		return 0, fmt.Errorf("not implemented")
 	}
 
 	pathCStr := CString(path)
@@ -198,13 +198,13 @@ func (efs *ExternalFileSystem) Write(path string, data []byte) ([]byte, error) {
 		dataCStr = &data[0]
 	}
 
-	responsePtr := efs.vtable.FSWrite(efs.pluginPtr, pathCStr, dataCStr, len(data))
-	if responsePtr == nil {
-		return []byte{}, nil
+	// Call C plugin with new signature: (plugin, path, data, len, offset, flags) -> int64
+	bytesWritten := efs.vtable.FSWrite(efs.pluginPtr, pathCStr, dataCStr, len(data), offset, uint32(flags))
+	if bytesWritten < 0 {
+		return 0, fmt.Errorf("write failed")
 	}
 
-	response := GoString(responsePtr)
-	return []byte(response), nil
+	return bytesWritten, nil
 }
 
 func (efs *ExternalFileSystem) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -312,7 +312,7 @@ func (wc *writeCloser) Write(p []byte) (n int, err error) {
 }
 
 func (wc *writeCloser) Close() error {
-	_, err := wc.fs.Write(wc.path, wc.buf)
+	_, err := wc.fs.Write(wc.path, wc.buf, -1, filesystem.WriteFlagCreate|filesystem.WriteFlagTruncate)
 	return err
 }
 

@@ -24,6 +24,12 @@ type WASMPlugin struct {
 // PooledWASMFileSystem implements filesystem.FileSystem using an instance pool
 type PooledWASMFileSystem struct {
 	pool *WASMInstancePool
+
+	// Handle management: maps handle ID to the handle object
+	// This ensures handle operations use the same handle instance with its bound WASM instance
+	handles      map[int64]*PooledWASMFileHandle
+	handleMu     sync.RWMutex
+	nextHandleID int64
 }
 
 // WASMFileSystem implements filesystem.FileSystem by delegating to WASM functions
@@ -45,7 +51,9 @@ func NewWASMPluginWithPool(pool *WASMInstancePool, name string) (*WASMPlugin, er
 		name:         name,
 		instancePool: pool,
 		fileSystem: &PooledWASMFileSystem{
-			pool: pool,
+			pool:         pool,
+			handles:      make(map[int64]*PooledWASMFileHandle),
+			nextHandleID: 1,
 		},
 	}
 
@@ -269,14 +277,14 @@ func (pfs *PooledWASMFileSystem) Read(path string, offset int64, size int64) ([]
 	return data, err
 }
 
-func (pfs *PooledWASMFileSystem) Write(path string, data []byte) ([]byte, error) {
-	var result []byte
+func (pfs *PooledWASMFileSystem) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
+	var bytesWritten int64
 	err := pfs.pool.ExecuteFS(func(fs filesystem.FileSystem) error {
 		var writeErr error
-		result, writeErr = fs.Write(path, data)
+		bytesWritten, writeErr = fs.Write(path, data, offset, flags)
 		return writeErr
 	})
-	return result, err
+	return bytesWritten, err
 }
 
 func (pfs *PooledWASMFileSystem) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -329,6 +337,197 @@ func (pfs *PooledWASMFileSystem) OpenWrite(path string) (io.WriteCloser, error) 
 		return openErr
 	})
 	return writer, err
+}
+
+// HandleFS interface for PooledWASMFileSystem
+
+// SupportsHandleFS checks if the underlying WASM plugin supports HandleFS
+func (pfs *PooledWASMFileSystem) SupportsHandleFS() bool {
+	var supports bool
+	pfs.pool.Execute(func(instance *WASMModuleInstance) error {
+		openFunc := instance.module.ExportedFunction("handle_open")
+		supports = openFunc != nil
+		return nil
+	})
+	return supports
+}
+
+// OpenHandle opens a file and returns a handle
+// This acquires a WASM instance and keeps it bound to this handle until close
+func (pfs *PooledWASMFileSystem) OpenHandle(path string, flags filesystem.OpenFlag, mode uint32) (filesystem.FileHandle, error) {
+	// Acquire an instance from the pool (and don't release it until handle is closed)
+	instance, err := pfs.pool.Acquire()
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire WASM instance: %w", err)
+	}
+
+	// Call OpenHandle on the WASM instance
+	handle, err := instance.fileSystem.OpenHandle(path, flags, mode)
+	if err != nil {
+		// Release the instance back to pool on error
+		pfs.pool.Release(instance)
+		return nil, err
+	}
+
+	// Assign a new int64 handle ID
+	pfs.handleMu.Lock()
+	handleID := pfs.nextHandleID
+	pfs.nextHandleID++
+
+	// Create a wrapped handle that routes operations through our tracking
+	pooledHandle := &PooledWASMFileHandle{
+		id:       handleID,
+		inner:    handle.(*WASMFileHandle),
+		pfs:      pfs,
+		instance: instance,
+	}
+
+	// Store the handle object so GetHandle can return it
+	pfs.handles[handleID] = pooledHandle
+	pfs.handleMu.Unlock()
+
+	return pooledHandle, nil
+}
+
+// GetHandle retrieves an existing handle by ID
+// Returns the same handle object that was created by OpenHandle
+func (pfs *PooledWASMFileSystem) GetHandle(id int64) (filesystem.FileHandle, error) {
+	pfs.handleMu.RLock()
+	handle, ok := pfs.handles[id]
+	pfs.handleMu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("handle not found: %d", id)
+	}
+
+	if handle.closed {
+		return nil, fmt.Errorf("handle is closed: %d", id)
+	}
+
+	return handle, nil
+}
+
+// CloseHandle closes a handle by ID
+func (pfs *PooledWASMFileSystem) CloseHandle(id int64) error {
+	pfs.handleMu.Lock()
+	handle, ok := pfs.handles[id]
+	if ok {
+		delete(pfs.handles, id)
+	}
+	pfs.handleMu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("handle not found: %d", id)
+	}
+
+	return handle.Close()
+}
+
+// PooledWASMFileHandle wraps WASMFileHandle to manage instance lifecycle
+type PooledWASMFileHandle struct {
+	id       int64
+	inner    *WASMFileHandle
+	pfs      *PooledWASMFileSystem
+	instance *WASMModuleInstance
+	closed   bool
+	mu       sync.Mutex
+}
+
+func (h *PooledWASMFileHandle) ID() int64 {
+	return h.id
+}
+
+func (h *PooledWASMFileHandle) Path() string {
+	return h.inner.Path()
+}
+
+func (h *PooledWASMFileHandle) Flags() filesystem.OpenFlag {
+	return h.inner.Flags()
+}
+
+func (h *PooledWASMFileHandle) Read(buf []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.inner.Read(buf)
+}
+
+func (h *PooledWASMFileHandle) ReadAt(buf []byte, offset int64) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.inner.ReadAt(buf, offset)
+}
+
+func (h *PooledWASMFileHandle) Write(data []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.inner.Write(data)
+}
+
+func (h *PooledWASMFileHandle) WriteAt(data []byte, offset int64) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.inner.WriteAt(data, offset)
+}
+
+func (h *PooledWASMFileHandle) Seek(offset int64, whence int) (int64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.inner.Seek(offset, whence)
+}
+
+func (h *PooledWASMFileHandle) Sync() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return fmt.Errorf("handle is closed")
+	}
+	return h.inner.Sync()
+}
+
+func (h *PooledWASMFileHandle) Stat() (*filesystem.FileInfo, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil, fmt.Errorf("handle is closed")
+	}
+	return h.inner.Stat()
+}
+
+func (h *PooledWASMFileHandle) Close() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return fmt.Errorf("handle is already closed")
+	}
+	h.closed = true
+
+	// Close the inner handle
+	err := h.inner.Close()
+
+	// Remove from tracking (if not already removed by CloseHandle)
+	h.pfs.handleMu.Lock()
+	delete(h.pfs.handles, h.id)
+	h.pfs.handleMu.Unlock()
+
+	// Release the WASM instance back to the pool
+	h.pfs.pool.Release(h.instance)
+
+	return err
 }
 
 // WASMFileSystem implementations
@@ -503,53 +702,50 @@ func (wfs *WASMFileSystem) Read(path string, offset int64, size int64) ([]byte, 
 	return data, nil
 }
 
-func (wfs *WASMFileSystem) Write(path string, data []byte) ([]byte, error) {
+func (wfs *WASMFileSystem) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	writeFunc := wfs.module.ExportedFunction("fs_write")
 	if writeFunc == nil {
-		return nil, fmt.Errorf("fs_write not implemented")
+		return 0, fmt.Errorf("fs_write not implemented")
 	}
 
 	pathPtr, pathPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, path, wfs.sharedBuffer)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer freeWASMMemoryWithBuffer(wfs.module, pathPtr, pathPtrSize, wfs.sharedBuffer)
 
 	dataPtr, dataPtrSize, err := writeBytesToMemoryWithBuffer(wfs.module, data, wfs.sharedBuffer)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer freeWASMMemoryWithBuffer(wfs.module, dataPtr, dataPtrSize, wfs.sharedBuffer)
 
-	results, err := writeFunc.Call(wfs.ctx, uint64(pathPtr), uint64(dataPtr), uint64(len(data)))
+	// Call WASM plugin with new signature: fs_write(path, data, len, offset, flags) -> packed u64
+	results, err := writeFunc.Call(wfs.ctx, uint64(pathPtr), uint64(dataPtr), uint64(len(data)), uint64(offset), uint64(flags))
 	if err != nil {
-		return nil, fmt.Errorf("fs_write failed: %w", err)
+		return 0, fmt.Errorf("fs_write failed: %w", err)
 	}
 
 	if len(results) < 1 {
-		return nil, fmt.Errorf("fs_write returned invalid results")
+		return 0, fmt.Errorf("fs_write returned invalid results")
 	}
 
-	// Unpack u64: lower 32 bits = pointer, upper 32 bits = size
+	// New return format: packed u64 with high 32 bits = bytes written, low 32 bits = error ptr
 	packed := results[0]
-	responsePtr := uint32(packed & 0xFFFFFFFF)
-	responseSize := uint32((packed >> 32) & 0xFFFFFFFF)
+	bytesWritten := uint32(packed >> 32)
+	errPtr := uint32(packed & 0xFFFFFFFF)
 
-	if responsePtr == 0 {
-		return nil, fmt.Errorf("write failed")
+	if errPtr != 0 {
+		// Read error message from WASM memory
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return 0, fmt.Errorf("write failed: %s", errMsg)
+		}
+		return 0, fmt.Errorf("write failed")
 	}
 
-	// Read response data from memory
-	response, ok := wfs.module.Memory().Read(responsePtr, responseSize)
-	if !ok {
-		freeWASMMemory(wfs.module, responsePtr, 0)
-		return nil, fmt.Errorf("failed to read response data from memory")
-	}
-
-	// Free WASM memory after copying data
-	freeWASMMemory(wfs.module, responsePtr, 0)
-
-	return response, nil
+	return int64(bytesWritten), nil
 }
 
 func (wfs *WASMFileSystem) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -759,6 +955,433 @@ func (wfs *WASMFileSystem) OpenWrite(path string) (io.WriteCloser, error) {
 	}, nil
 }
 
+// HandleFS interface implementation for WASM plugins
+
+// SupportsHandleFS checks if the WASM plugin exports handle functions
+func (wfs *WASMFileSystem) SupportsHandleFS() bool {
+	openFunc := wfs.module.ExportedFunction("handle_open")
+	return openFunc != nil
+}
+
+// OpenHandle opens a file and returns a handle
+func (wfs *WASMFileSystem) OpenHandle(path string, flags filesystem.OpenFlag, mode uint32) (filesystem.FileHandle, error) {
+	openFunc := wfs.module.ExportedFunction("handle_open")
+	if openFunc == nil {
+		return nil, fmt.Errorf("handle_open not implemented in WASM plugin")
+	}
+
+	pathPtr, pathPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, path, wfs.sharedBuffer)
+	if err != nil {
+		return nil, err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, pathPtr, pathPtrSize, wfs.sharedBuffer)
+
+	results, err := openFunc.Call(wfs.ctx, uint64(pathPtr), uint64(flags), uint64(mode))
+	if err != nil {
+		return nil, fmt.Errorf("handle_open failed: %w", err)
+	}
+
+	if len(results) < 1 {
+		return nil, fmt.Errorf("handle_open returned invalid results")
+	}
+
+	// Unpack u64: low 32 bits = handle_id ptr, high 32 bits = error ptr
+	// Rust pack_u64(low, high) puts first arg in low bits, second in high bits
+	packed := results[0]
+	idPtr := uint32(packed & 0xFFFFFFFF)
+	errPtr := uint32(packed >> 32)
+
+	if errPtr != 0 {
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return nil, fmt.Errorf("open handle failed: %s", errMsg)
+		}
+		return nil, fmt.Errorf("open handle failed")
+	}
+
+	if idPtr == 0 {
+		return nil, fmt.Errorf("handle_open returned null id")
+	}
+
+	handleID, ok := readStringFromMemory(wfs.module, idPtr)
+	freeWASMMemory(wfs.module, idPtr, 0)
+	if !ok {
+		return nil, fmt.Errorf("failed to read handle ID")
+	}
+
+	return &WASMFileHandle{
+		wasmID: handleID,
+		path:   path,
+		flags:  flags,
+		wfs:    wfs,
+	}, nil
+}
+
+// GetHandle retrieves an existing handle by ID
+// For WASMFileSystem, this is not directly supported since we use string IDs internally
+// The PooledWASMFileSystem layer handles the int64 to internal mapping
+func (wfs *WASMFileSystem) GetHandle(id int64) (filesystem.FileHandle, error) {
+	return nil, fmt.Errorf("WASMFileSystem.GetHandle not supported directly; use PooledWASMFileSystem")
+}
+
+// CloseHandle closes a handle by ID
+// For WASMFileSystem, this is not directly supported since we use string IDs internally
+func (wfs *WASMFileSystem) CloseHandle(id int64) error {
+	return fmt.Errorf("WASMFileSystem.CloseHandle not supported directly; use PooledWASMFileSystem")
+}
+
+// Internal handle operation methods
+
+func (wfs *WASMFileSystem) handleRead(id string, buf []byte) (int, error) {
+	readFunc := wfs.module.ExportedFunction("handle_read")
+	if readFunc == nil {
+		return 0, fmt.Errorf("handle_read not implemented")
+	}
+
+	// Use malloc for id string (don't use shared buffer to avoid conflict with buf)
+	idPtr, idPtrSize, err := writeStringToMemory(wfs.module, id)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemory(wfs.module, idPtr, idPtrSize)
+
+	// Allocate buffer in WASM memory (can use shared buffer)
+	bufPtr, bufPtrSize, err := writeBytesToMemoryWithBuffer(wfs.module, make([]byte, len(buf)), wfs.sharedBuffer)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, bufPtr, bufPtrSize, wfs.sharedBuffer)
+
+	results, err := readFunc.Call(wfs.ctx, uint64(idPtr), uint64(bufPtr), uint64(len(buf)))
+	if err != nil {
+		return 0, fmt.Errorf("handle_read failed: %w", err)
+	}
+
+	if len(results) < 1 {
+		return 0, fmt.Errorf("handle_read returned invalid results")
+	}
+
+	// Unpack u64: low 32 bits = bytes read, high 32 bits = error ptr
+	packed := results[0]
+	bytesRead := uint32(packed & 0xFFFFFFFF)
+	errPtr := uint32(packed >> 32)
+
+	if errPtr != 0 {
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return 0, fmt.Errorf("read failed: %s", errMsg)
+		}
+		return 0, fmt.Errorf("read failed")
+	}
+
+	// Copy data from WASM memory to buf
+	if bytesRead > 0 {
+		data, ok := wfs.module.Memory().Read(bufPtr, bytesRead)
+		if !ok {
+			return 0, fmt.Errorf("failed to read data from WASM memory")
+		}
+		copy(buf, data)
+	}
+
+	return int(bytesRead), nil
+}
+
+func (wfs *WASMFileSystem) handleReadAt(id string, buf []byte, offset int64) (int, error) {
+	readAtFunc := wfs.module.ExportedFunction("handle_read_at")
+	if readAtFunc == nil {
+		return 0, fmt.Errorf("handle_read_at not implemented")
+	}
+
+	// Use malloc for id string (don't use shared buffer to avoid conflict with buf)
+	idPtr, idPtrSize, err := writeStringToMemory(wfs.module, id)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemory(wfs.module, idPtr, idPtrSize)
+
+	bufPtr, bufPtrSize, err := writeBytesToMemoryWithBuffer(wfs.module, make([]byte, len(buf)), wfs.sharedBuffer)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, bufPtr, bufPtrSize, wfs.sharedBuffer)
+
+	results, err := readAtFunc.Call(wfs.ctx, uint64(idPtr), uint64(bufPtr), uint64(len(buf)), uint64(offset))
+	if err != nil {
+		return 0, fmt.Errorf("handle_read_at failed: %w", err)
+	}
+
+	if len(results) < 1 {
+		return 0, fmt.Errorf("handle_read_at returned invalid results")
+	}
+
+	// Unpack u64: low 32 bits = bytes read, high 32 bits = error ptr
+	packed := results[0]
+	bytesRead := uint32(packed & 0xFFFFFFFF)
+	errPtr := uint32(packed >> 32)
+
+	if errPtr != 0 {
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return 0, fmt.Errorf("read at failed: %s", errMsg)
+		}
+		return 0, fmt.Errorf("read at failed")
+	}
+
+	if bytesRead > 0 {
+		data, ok := wfs.module.Memory().Read(bufPtr, bytesRead)
+		if !ok {
+			return 0, fmt.Errorf("failed to read data from WASM memory")
+		}
+		copy(buf, data)
+	}
+
+	return int(bytesRead), nil
+}
+
+func (wfs *WASMFileSystem) handleWrite(id string, data []byte) (int, error) {
+	writeFunc := wfs.module.ExportedFunction("handle_write")
+	if writeFunc == nil {
+		return 0, fmt.Errorf("handle_write not implemented")
+	}
+
+	// Use malloc for id string (don't use shared buffer to avoid conflict with data)
+	idPtr, idPtrSize, err := writeStringToMemory(wfs.module, id)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemory(wfs.module, idPtr, idPtrSize)
+
+	dataPtr, dataPtrSize, err := writeBytesToMemoryWithBuffer(wfs.module, data, wfs.sharedBuffer)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, dataPtr, dataPtrSize, wfs.sharedBuffer)
+
+	results, err := writeFunc.Call(wfs.ctx, uint64(idPtr), uint64(dataPtr), uint64(len(data)))
+	if err != nil {
+		return 0, fmt.Errorf("handle_write failed: %w", err)
+	}
+
+	if len(results) < 1 {
+		return 0, fmt.Errorf("handle_write returned invalid results")
+	}
+
+	// Unpack u64: low 32 bits = bytes written, high 32 bits = error ptr
+	packed := results[0]
+	bytesWritten := uint32(packed & 0xFFFFFFFF)
+	errPtr := uint32(packed >> 32)
+
+	if errPtr != 0 {
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return 0, fmt.Errorf("write failed: %s", errMsg)
+		}
+		return 0, fmt.Errorf("write failed")
+	}
+
+	return int(bytesWritten), nil
+}
+
+func (wfs *WASMFileSystem) handleWriteAt(id string, data []byte, offset int64) (int, error) {
+	writeAtFunc := wfs.module.ExportedFunction("handle_write_at")
+	if writeAtFunc == nil {
+		return 0, fmt.Errorf("handle_write_at not implemented")
+	}
+
+	// Use malloc for id string (don't use shared buffer to avoid conflict with data)
+	idPtr, idPtrSize, err := writeStringToMemory(wfs.module, id)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemory(wfs.module, idPtr, idPtrSize)
+
+	dataPtr, dataPtrSize, err := writeBytesToMemoryWithBuffer(wfs.module, data, wfs.sharedBuffer)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, dataPtr, dataPtrSize, wfs.sharedBuffer)
+
+	results, err := writeAtFunc.Call(wfs.ctx, uint64(idPtr), uint64(dataPtr), uint64(len(data)), uint64(offset))
+	if err != nil {
+		return 0, fmt.Errorf("handle_write_at failed: %w", err)
+	}
+
+	if len(results) < 1 {
+		return 0, fmt.Errorf("handle_write_at returned invalid results")
+	}
+
+	// Unpack u64: low 32 bits = bytes written, high 32 bits = error ptr
+	packed := results[0]
+	bytesWritten := uint32(packed & 0xFFFFFFFF)
+	errPtr := uint32(packed >> 32)
+
+	if errPtr != 0 {
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return 0, fmt.Errorf("write at failed: %s", errMsg)
+		}
+		return 0, fmt.Errorf("write at failed")
+	}
+
+	return int(bytesWritten), nil
+}
+
+func (wfs *WASMFileSystem) handleSeek(id string, offset int64, whence int) (int64, error) {
+	seekFunc := wfs.module.ExportedFunction("handle_seek")
+	if seekFunc == nil {
+		return 0, fmt.Errorf("handle_seek not implemented")
+	}
+
+	idPtr, idPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, id, wfs.sharedBuffer)
+	if err != nil {
+		return 0, err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, idPtr, idPtrSize, wfs.sharedBuffer)
+
+	results, err := seekFunc.Call(wfs.ctx, uint64(idPtr), uint64(offset), uint64(whence))
+	if err != nil {
+		return 0, fmt.Errorf("handle_seek failed: %w", err)
+	}
+
+	if len(results) < 1 {
+		return 0, fmt.Errorf("handle_seek returned invalid results")
+	}
+
+	// Unpack u64: low 32 bits = new position, high 32 bits = error ptr
+	packed := results[0]
+	newPos := uint32(packed & 0xFFFFFFFF)
+	errPtr := uint32(packed >> 32)
+
+	if errPtr != 0 {
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return 0, fmt.Errorf("seek failed: %s", errMsg)
+		}
+		return 0, fmt.Errorf("seek failed")
+	}
+
+	return int64(newPos), nil
+}
+
+func (wfs *WASMFileSystem) handleSync(id string) error {
+	syncFunc := wfs.module.ExportedFunction("handle_sync")
+	if syncFunc == nil {
+		return fmt.Errorf("handle_sync not implemented")
+	}
+
+	idPtr, idPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, id, wfs.sharedBuffer)
+	if err != nil {
+		return err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, idPtr, idPtrSize, wfs.sharedBuffer)
+
+	results, err := syncFunc.Call(wfs.ctx, uint64(idPtr))
+	if err != nil {
+		return fmt.Errorf("handle_sync failed: %w", err)
+	}
+
+	if len(results) > 0 && results[0] != 0 {
+		errPtr := uint32(results[0])
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return fmt.Errorf("sync failed: %s", errMsg)
+		}
+		return fmt.Errorf("sync failed")
+	}
+
+	return nil
+}
+
+func (wfs *WASMFileSystem) handleClose(id string) error {
+	closeFunc := wfs.module.ExportedFunction("handle_close")
+	if closeFunc == nil {
+		return fmt.Errorf("handle_close not implemented")
+	}
+
+	idPtr, idPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, id, wfs.sharedBuffer)
+	if err != nil {
+		return err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, idPtr, idPtrSize, wfs.sharedBuffer)
+
+	results, err := closeFunc.Call(wfs.ctx, uint64(idPtr))
+	if err != nil {
+		return fmt.Errorf("handle_close failed: %w", err)
+	}
+
+	if len(results) > 0 && results[0] != 0 {
+		errPtr := uint32(results[0])
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return fmt.Errorf("close failed: %s", errMsg)
+		}
+		return fmt.Errorf("close failed")
+	}
+
+	return nil
+}
+
+func (wfs *WASMFileSystem) handleStat(id string) (*filesystem.FileInfo, error) {
+	statFunc := wfs.module.ExportedFunction("handle_stat")
+	if statFunc == nil {
+		return nil, fmt.Errorf("handle_stat not implemented")
+	}
+
+	idPtr, idPtrSize, err := writeStringToMemoryWithBuffer(wfs.module, id, wfs.sharedBuffer)
+	if err != nil {
+		return nil, err
+	}
+	defer freeWASMMemoryWithBuffer(wfs.module, idPtr, idPtrSize, wfs.sharedBuffer)
+
+	results, err := statFunc.Call(wfs.ctx, uint64(idPtr))
+	if err != nil {
+		return nil, fmt.Errorf("handle_stat failed: %w", err)
+	}
+
+	if len(results) < 1 {
+		return nil, fmt.Errorf("handle_stat returned invalid results")
+	}
+
+	// Unpack u64: low 32 bits = json ptr, high 32 bits = error ptr
+	packed := results[0]
+	jsonPtr := uint32(packed & 0xFFFFFFFF)
+	errPtr := uint32(packed >> 32)
+
+	if errPtr != 0 {
+		errMsg, ok := readStringFromMemory(wfs.module, errPtr)
+		freeWASMMemory(wfs.module, errPtr, 0)
+		if ok && errMsg != "" {
+			return nil, fmt.Errorf("stat failed: %s", errMsg)
+		}
+		return nil, fmt.Errorf("stat failed")
+	}
+
+	if jsonPtr == 0 {
+		return nil, fmt.Errorf("handle_stat returned null")
+	}
+
+	jsonStr, ok := readStringFromMemory(wfs.module, jsonPtr)
+	freeWASMMemory(wfs.module, jsonPtr, 0)
+	if !ok {
+		return nil, fmt.Errorf("failed to read stat result")
+	}
+
+	var fileInfo filesystem.FileInfo
+	if err := json.Unmarshal([]byte(jsonStr), &fileInfo); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal stat result: %w", err)
+	}
+
+	return &fileInfo, nil
+}
+
 // Helper types for Open/OpenWrite implementation
 
 type wasmWriteCloser struct {
@@ -767,13 +1390,105 @@ type wasmWriteCloser struct {
 	buf  []byte
 }
 
+// WASMFileHandle implements filesystem.FileHandle for WASM plugins
+// Note: id is the internal handle ID used by the WASM plugin (string)
+// The ID() method returns a placeholder since WASMFileHandle is wrapped by PooledWASMFileHandle
+type WASMFileHandle struct {
+	wasmID string // WASM plugin's internal handle ID
+	path   string
+	flags  filesystem.OpenFlag
+	wfs    *WASMFileSystem
+	closed bool
+}
+
+// ID returns -1 since WASMFileHandle is always wrapped by PooledWASMFileHandle
+// The real int64 ID is provided by PooledWASMFileHandle
+func (h *WASMFileHandle) ID() int64 {
+	return -1 // Should never be called directly; use PooledWASMFileHandle.ID()
+}
+
+// Path returns the file path
+func (h *WASMFileHandle) Path() string {
+	return h.path
+}
+
+// Flags returns the open flags
+func (h *WASMFileHandle) Flags() filesystem.OpenFlag {
+	return h.flags
+}
+
+// Read reads from the current position
+func (h *WASMFileHandle) Read(buf []byte) (int, error) {
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.wfs.handleRead(h.wasmID, buf)
+}
+
+// ReadAt reads at a specific offset
+func (h *WASMFileHandle) ReadAt(buf []byte, offset int64) (int, error) {
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.wfs.handleReadAt(h.wasmID, buf, offset)
+}
+
+// Write writes at the current position
+func (h *WASMFileHandle) Write(data []byte) (int, error) {
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.wfs.handleWrite(h.wasmID, data)
+}
+
+// WriteAt writes at a specific offset
+func (h *WASMFileHandle) WriteAt(data []byte, offset int64) (int, error) {
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.wfs.handleWriteAt(h.wasmID, data, offset)
+}
+
+// Seek changes the file position
+func (h *WASMFileHandle) Seek(offset int64, whence int) (int64, error) {
+	if h.closed {
+		return 0, fmt.Errorf("handle is closed")
+	}
+	return h.wfs.handleSeek(h.wasmID, offset, whence)
+}
+
+// Sync flushes data to storage
+func (h *WASMFileHandle) Sync() error {
+	if h.closed {
+		return fmt.Errorf("handle is closed")
+	}
+	return h.wfs.handleSync(h.wasmID)
+}
+
+// Close closes the handle
+func (h *WASMFileHandle) Close() error {
+	if h.closed {
+		return nil
+	}
+	h.closed = true
+	return h.wfs.handleClose(h.wasmID)
+}
+
+// Stat returns file info
+func (h *WASMFileHandle) Stat() (*filesystem.FileInfo, error) {
+	if h.closed {
+		return nil, fmt.Errorf("handle is closed")
+	}
+	return h.wfs.handleStat(h.wasmID)
+}
+
 func (w *wasmWriteCloser) Write(p []byte) (n int, err error) {
 	w.buf = append(w.buf, p...)
 	return len(p), nil
 }
 
 func (w *wasmWriteCloser) Close() error {
-	_, err := w.fs.Write(w.path, w.buf)
+	_, err := w.fs.Write(w.path, w.buf, -1, filesystem.WriteFlagCreate|filesystem.WriteFlagTruncate)
 	return err
 }
 

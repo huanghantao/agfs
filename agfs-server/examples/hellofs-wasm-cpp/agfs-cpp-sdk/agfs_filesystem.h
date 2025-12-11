@@ -41,9 +41,15 @@ public:
         return Error::read_only();
     }
 
-    // Write data to a file (returns response data)
-    virtual Result<std::vector<uint8_t>> write(const std::string& path, const std::vector<uint8_t>& data) {
-        (void)path; (void)data; // unused
+    // Write data to a file
+    // Arguments:
+    //   path - The file path
+    //   data - Data to write
+    //   offset - Position to write at (-1 for append mode behavior)
+    //   flags - Write flags (CREATE, TRUNCATE, APPEND, etc.)
+    // Returns: Number of bytes written
+    virtual Result<int64_t> write(const std::string& path, const std::vector<uint8_t>& data, int64_t offset, WriteFlag flags) {
+        (void)path; (void)data; (void)offset; (void)flags; // unused
         return Error::read_only();
     }
 

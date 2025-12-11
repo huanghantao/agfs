@@ -257,15 +257,16 @@ func (h *Handler) WriteFile(w http.ResponseWriter, r *http.Request) {
 		h.trafficMonitor.RecordWrite(int64(len(data)))
 	}
 
-	response, err := h.fs.Write(path, data)
+	// Use default flags: create if not exists, truncate (like the old behavior)
+	bytesWritten, err := h.fs.Write(path, data, -1, filesystem.WriteFlagCreate|filesystem.WriteFlagTruncate)
 	if err != nil {
 		status := mapErrorToStatus(err)
 		writeError(w, status, err.Error())
 		return
 	}
 
-	// Return the custom message from the filesystem
-	writeJSON(w, http.StatusOK, SuccessResponse{Message: string(response)})
+	// Return success with bytes written
+	writeJSON(w, http.StatusOK, SuccessResponse{Message: fmt.Sprintf("Written %d bytes", bytesWritten)})
 }
 
 // Delete handles DELETE /files?path=<path>&recursive=<true|false>
@@ -565,7 +566,7 @@ func (h *Handler) Touch(w http.ResponseWriter, r *http.Request) {
 				writeError(w, status, readErr.Error())
 				return
 			}
-			_, writeErr := h.fs.Write(path, data)
+			_, writeErr := h.fs.Write(path, data, -1, filesystem.WriteFlagTruncate)
 			if writeErr != nil {
 				status := mapErrorToStatus(writeErr)
 				writeError(w, status, writeErr.Error())
@@ -578,7 +579,7 @@ func (h *Handler) Touch(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// File doesn't exist - create with empty content
-		_, err := h.fs.Write(path, []byte{})
+		_, err := h.fs.Write(path, []byte{}, -1, filesystem.WriteFlagCreate)
 		if err != nil {
 			status := mapErrorToStatus(err)
 			writeError(w, status, err.Error())
@@ -592,6 +593,10 @@ func (h *Handler) Touch(w http.ResponseWriter, r *http.Request) {
 // SetupRoutes sets up all HTTP routes with /api/v1 prefix
 func (h *Handler) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/health", h.Health)
+
+	// Setup handle routes (file handles for stateful operations)
+	h.SetupHandleRoutes(mux)
+
 	mux.HandleFunc("/api/v1/files", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:

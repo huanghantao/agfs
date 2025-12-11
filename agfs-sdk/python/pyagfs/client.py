@@ -557,3 +557,411 @@ class AGFSClient:
             return response.json()
         except Exception as e:
             self._handle_request_error(e)
+
+    # ==================== HandleFS API ====================
+    # These APIs provide POSIX-like file handle operations for
+    # filesystems that support stateful file access (e.g., seek, pread/pwrite)
+
+    def open_handle(self, path: str, flags: int = 0, mode: int = 0o644, lease: int = 60) -> 'FileHandle':
+        """Open a file handle for stateful operations
+
+        Args:
+            path: Path to the file
+            flags: Open flags (0=O_RDONLY, 1=O_WRONLY, 2=O_RDWR, can OR with O_APPEND=8, O_CREATE=16, O_EXCL=32, O_TRUNC=64)
+            mode: File mode for creation (default: 0644)
+            lease: Lease duration in seconds (default: 60)
+
+        Returns:
+            FileHandle object for performing operations
+
+        Example:
+            >>> with client.open_handle("/memfs/file.txt", flags=2) as fh:
+            ...     data = fh.read(100)
+            ...     fh.seek(0)
+            ...     fh.write(b"Hello")
+        """
+        try:
+            response = self.session.post(
+                f"{self.api_base}/handles/open",
+                params={"path": path, "flags": str(flags), "mode": str(mode), "lease": str(lease)},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            return FileHandle(self, data["handle_id"], path, data.get("flags", ""))
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def list_handles(self) -> List[Dict[str, Any]]:
+        """List all active file handles
+
+        Returns:
+            List of handle info dicts with keys: handle_id, path, flags, lease, expires_at, created_at, last_access
+        """
+        try:
+            response = self.session.get(
+                f"{self.api_base}/handles",
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("handles", [])
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def get_handle_info(self, handle_id: int) -> Dict[str, Any]:
+        """Get information about a specific handle
+
+        Args:
+            handle_id: The handle ID (int64)
+
+        Returns:
+            Handle info dict
+        """
+        try:
+            response = self.session.get(
+                f"{self.api_base}/handles/{handle_id}",
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def close_handle(self, handle_id: int) -> Dict[str, Any]:
+        """Close a file handle
+
+        Args:
+            handle_id: The handle ID (int64) to close
+
+        Returns:
+            Response with message
+        """
+        try:
+            response = self.session.delete(
+                f"{self.api_base}/handles/{handle_id}",
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def handle_read(self, handle_id: int, size: int = -1, offset: Optional[int] = None) -> bytes:
+        """Read from a file handle
+
+        Args:
+            handle_id: The handle ID (int64)
+            size: Number of bytes to read (default: -1, read all)
+            offset: If specified, read at this offset (pread), otherwise read at current position
+
+        Returns:
+            bytes content
+        """
+        try:
+            params = {"size": str(size)}
+            if offset is not None:
+                params["offset"] = str(offset)
+            response = self.session.get(
+                f"{self.api_base}/handles/{handle_id}/read",
+                params=params,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def handle_write(self, handle_id: int, data: bytes, offset: Optional[int] = None) -> int:
+        """Write to a file handle
+
+        Args:
+            handle_id: The handle ID (int64)
+            data: Data to write
+            offset: If specified, write at this offset (pwrite), otherwise write at current position
+
+        Returns:
+            Number of bytes written
+        """
+        try:
+            params = {}
+            if offset is not None:
+                params["offset"] = str(offset)
+            response = self.session.put(
+                f"{self.api_base}/handles/{handle_id}/write",
+                params=params,
+                data=data,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get("bytes_written", 0)
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def handle_seek(self, handle_id: int, offset: int, whence: int = 0) -> int:
+        """Seek within a file handle
+
+        Args:
+            handle_id: The handle ID (int64)
+            offset: Offset to seek to
+            whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+
+        Returns:
+            New position
+        """
+        try:
+            response = self.session.post(
+                f"{self.api_base}/handles/{handle_id}/seek",
+                params={"offset": str(offset), "whence": str(whence)},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get("position", 0)
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def handle_sync(self, handle_id: int) -> Dict[str, Any]:
+        """Sync a file handle (flush to storage)
+
+        Args:
+            handle_id: The handle ID (int64)
+
+        Returns:
+            Response with message
+        """
+        try:
+            response = self.session.post(
+                f"{self.api_base}/handles/{handle_id}/sync",
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def handle_stat(self, handle_id: int) -> Dict[str, Any]:
+        """Get file info via handle
+
+        Args:
+            handle_id: The handle ID (int64)
+
+        Returns:
+            File info dict
+        """
+        try:
+            response = self.session.get(
+                f"{self.api_base}/handles/{handle_id}/stat",
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self._handle_request_error(e)
+
+    def renew_handle(self, handle_id: int, lease: int = 60) -> Dict[str, Any]:
+        """Renew the lease on a file handle
+
+        Args:
+            handle_id: The handle ID (int64)
+            lease: New lease duration in seconds
+
+        Returns:
+            Response with new expires_at
+        """
+        try:
+            response = self.session.post(
+                f"{self.api_base}/handles/{handle_id}/renew",
+                params={"lease": str(lease)},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self._handle_request_error(e)
+
+
+class FileHandle:
+    """A file handle for stateful file operations
+
+    Supports context manager protocol for automatic cleanup.
+
+    Example:
+        >>> with client.open_handle("/memfs/file.txt", flags=2) as fh:
+        ...     fh.write(b"Hello World")
+        ...     fh.seek(0)
+        ...     print(fh.read())
+    """
+
+    # Open flag constants
+    O_RDONLY = 0
+    O_WRONLY = 1
+    O_RDWR = 2
+    O_APPEND = 8
+    O_CREATE = 16
+    O_EXCL = 32
+    O_TRUNC = 64
+
+    # Seek whence constants
+    SEEK_SET = 0
+    SEEK_CUR = 1
+    SEEK_END = 2
+
+    def __init__(self, client: AGFSClient, handle_id: int, path: str, flags: int):
+        self._client = client
+        self._handle_id = handle_id
+        self._path = path
+        self._flags = flags
+        self._closed = False
+
+    @property
+    def handle_id(self) -> int:
+        """The handle ID (int64)"""
+        return self._handle_id
+
+    @property
+    def path(self) -> str:
+        """The file path"""
+        return self._path
+
+    @property
+    def flags(self) -> int:
+        """The open flags (numeric)"""
+        return self._flags
+
+    @property
+    def closed(self) -> bool:
+        """Whether the handle is closed"""
+        return self._closed
+
+    def read(self, size: int = -1) -> bytes:
+        """Read from current position
+
+        Args:
+            size: Number of bytes to read (default: -1, read all)
+
+        Returns:
+            bytes content
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        return self._client.handle_read(self._handle_id, size)
+
+    def read_at(self, size: int, offset: int) -> bytes:
+        """Read at specific offset (pread)
+
+        Args:
+            size: Number of bytes to read
+            offset: Offset to read from
+
+        Returns:
+            bytes content
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        return self._client.handle_read(self._handle_id, size, offset)
+
+    def write(self, data: bytes) -> int:
+        """Write at current position
+
+        Args:
+            data: Data to write
+
+        Returns:
+            Number of bytes written
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        return self._client.handle_write(self._handle_id, data)
+
+    def write_at(self, data: bytes, offset: int) -> int:
+        """Write at specific offset (pwrite)
+
+        Args:
+            data: Data to write
+            offset: Offset to write at
+
+        Returns:
+            Number of bytes written
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        return self._client.handle_write(self._handle_id, data, offset)
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        """Seek to position
+
+        Args:
+            offset: Offset to seek to
+            whence: SEEK_SET(0), SEEK_CUR(1), or SEEK_END(2)
+
+        Returns:
+            New position
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        return self._client.handle_seek(self._handle_id, offset, whence)
+
+    def tell(self) -> int:
+        """Get current position
+
+        Returns:
+            Current position
+        """
+        return self.seek(0, self.SEEK_CUR)
+
+    def sync(self) -> None:
+        """Flush data to storage"""
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        self._client.handle_sync(self._handle_id)
+
+    def stat(self) -> Dict[str, Any]:
+        """Get file info
+
+        Returns:
+            File info dict
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        return self._client.handle_stat(self._handle_id)
+
+    def info(self) -> Dict[str, Any]:
+        """Get handle info
+
+        Returns:
+            Handle info dict
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        return self._client.get_handle_info(self._handle_id)
+
+    def renew(self, lease: int = 60) -> Dict[str, Any]:
+        """Renew the handle lease
+
+        Args:
+            lease: New lease duration in seconds
+
+        Returns:
+            Response with new expires_at
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        return self._client.renew_handle(self._handle_id, lease)
+
+    def close(self) -> None:
+        """Close the handle"""
+        if not self._closed:
+            self._client.close_handle(self._handle_id)
+            self._closed = True
+
+    def __enter__(self) -> 'FileHandle':
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        status = "closed" if self._closed else "open"
+        return f"FileHandle(id={self._handle_id}, path={self._path}, flags={self._flags}, {status})"

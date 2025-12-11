@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agfs-mcp"
-version = "1.0.0"
+version = "1.4.0"
 description = "Model Context Protocol (MCP) server for AGFS (Plugable File System)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
 dependencies = [
     "beautifulsoup4",
     "requests",
-    "pyagfs>=0.1.1",
+    "pyagfs>=1.4.0",
     "mcp>=0.9.0",
 ]
 

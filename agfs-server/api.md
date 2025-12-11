@@ -60,18 +60,47 @@ curl "http://localhost:8080/api/v1/files?path=/memfs/data.txt"
 ```
 
 ### Write File
-Write content to a file. Overwrites existing content.
+Write content to a file. Supports various write modes through flags.
 
 **Endpoint:** `PUT /api/v1/files`
 
 **Query Parameters:**
 - `path` (required): Absolute path to the file.
+- `offset` (optional): Byte offset for write position. Use `-1` for default behavior (typically truncate or append based on flags).
+- `flags` (optional): Comma-separated write flags to control behavior.
+
+**Write Flags:**
+- `append` - Append data to end of file
+- `create` - Create file if it doesn't exist
+- `exclusive` - Fail if file already exists (with `create`)
+- `truncate` - Truncate file before writing
+- `sync` - Synchronous write (fsync after write)
+
+Default behavior (no flags): Creates file if needed and truncates existing content.
 
 **Body:** Raw file content.
 
-**Example:**
+**Response:**
+```json
+{
+  "message": "write successful",
+  "written": 1024
+}
+```
+
+**Examples:**
 ```bash
+# Overwrite file (default behavior)
 curl -X PUT "http://localhost:8080/api/v1/files?path=/memfs/data.txt" -d "Hello World"
+
+# Append to file
+curl -X PUT "http://localhost:8080/api/v1/files?path=/memfs/data.txt&flags=append" -d "More content"
+
+# Write at specific offset (pwrite-style)
+curl -X PUT "http://localhost:8080/api/v1/files?path=/memfs/data.txt&offset=10" -d "inserted"
+
+# Create exclusively (fail if exists)
+curl -X PUT "http://localhost:8080/api/v1/files?path=/memfs/new.txt&flags=create,exclusive" -d "content"
 ```
 
 ### Create Empty File
@@ -445,4 +474,291 @@ Check server status and version.
 **Example:**
 ```bash
 curl "http://localhost:8080/api/v1/health"
+```
+
+---
+
+## Capabilities
+
+### Get Capabilities
+Query the capabilities of a filesystem at a given path. Different filesystems support different features.
+
+**Endpoint:** `GET /api/v1/capabilities`
+
+**Query Parameters:**
+- `path` (required): Absolute path to query capabilities for.
+
+**Response:**
+```json
+{
+  "supportsRandomWrite": true,
+  "supportsTruncate": true,
+  "supportsSync": true,
+  "supportsTouch": true,
+  "supportsFileHandle": true,
+  "isAppendOnly": false,
+  "isReadDestructive": false,
+  "isObjectStore": false,
+  "isBroadcast": false,
+  "supportsStreamRead": false
+}
+```
+
+**Capability Descriptions:**
+- `supportsRandomWrite` - Supports writing at arbitrary offsets (pwrite)
+- `supportsTruncate` - Supports truncating files to a specific size
+- `supportsSync` - Supports fsync/flush operations
+- `supportsTouch` - Supports updating file timestamps
+- `supportsFileHandle` - Supports stateful file handle operations
+- `isAppendOnly` - Only supports append operations (e.g., QueueFS enqueue)
+- `isReadDestructive` - Read operations have side effects (e.g., QueueFS dequeue)
+- `isObjectStore` - Object store semantics, no partial writes (e.g., S3FS)
+- `isBroadcast` - Supports broadcast/fanout reads (e.g., StreamFS)
+- `supportsStreamRead` - Supports streaming/chunked reads
+
+**Example:**
+```bash
+curl "http://localhost:8080/api/v1/capabilities?path=/memfs"
+```
+
+---
+
+## File Handles (Stateful Operations)
+
+File handles provide stateful file access with seek support. This is useful for FUSE implementations and scenarios requiring multiple read/write operations on the same file. Handles use a lease mechanism for automatic cleanup.
+
+### Open File Handle
+Open a file and get a handle for subsequent operations.
+
+**Endpoint:** `POST /api/v1/handles/open`
+
+**Query Parameters:**
+- `path` (required): Absolute path to the file.
+- `flags` (optional): Open flags (comma-separated): `read`, `write`, `readwrite`, `append`, `create`, `exclusive`, `truncate`.
+- `mode` (optional): File mode for creation (octal, e.g., `0644`).
+- `lease` (optional): Lease duration in seconds (default: 60, max: 300).
+
+**Response:**
+```json
+{
+  "handle_id": "h_abc123",
+  "path": "/memfs/file.txt",
+  "flags": "readwrite",
+  "lease": 60,
+  "expires_at": "2024-01-01T12:01:00Z"
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8080/api/v1/handles/open?path=/memfs/file.txt&flags=readwrite,create&lease=120"
+```
+
+### Read via Handle
+Read data from an open file handle.
+
+**Endpoint:** `GET /api/v1/handles/{handle_id}/read`
+
+**Query Parameters:**
+- `offset` (optional): Position to read from. If not specified, reads from current position.
+- `size` (optional): Number of bytes to read.
+
+**Response:** Binary data (`application/octet-stream`)
+
+**Note:** Each operation automatically renews the handle's lease.
+
+**Example:**
+```bash
+curl "http://localhost:8080/api/v1/handles/h_abc123/read?offset=0&size=1024"
+```
+
+### Write via Handle
+Write data to an open file handle.
+
+**Endpoint:** `PUT /api/v1/handles/{handle_id}/write`
+
+**Query Parameters:**
+- `offset` (optional): Position to write at. If not specified, writes at current position.
+
+**Body:** Raw binary data.
+
+**Response:**
+```json
+{
+  "written": 1024
+}
+```
+
+**Example:**
+```bash
+curl -X PUT "http://localhost:8080/api/v1/handles/h_abc123/write?offset=0" -d "Hello World"
+```
+
+### Seek Handle
+Change the current read/write position.
+
+**Endpoint:** `POST /api/v1/handles/{handle_id}/seek`
+
+**Query Parameters:**
+- `offset` (required): Offset value.
+- `whence` (optional): Reference point: `0` (start), `1` (current), `2` (end). Default: `0`.
+
+**Response:**
+```json
+{
+  "position": 1024
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8080/api/v1/handles/h_abc123/seek?offset=100&whence=0"
+```
+
+### Sync Handle
+Flush any buffered data to storage.
+
+**Endpoint:** `POST /api/v1/handles/{handle_id}/sync`
+
+**Response:**
+```json
+{
+  "message": "synced"
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8080/api/v1/handles/h_abc123/sync"
+```
+
+### Renew Handle Lease
+Explicitly renew the handle's lease (operations auto-renew).
+
+**Endpoint:** `POST /api/v1/handles/{handle_id}/renew`
+
+**Query Parameters:**
+- `lease` (optional): New lease duration in seconds (max: 300).
+
+**Response:**
+```json
+{
+  "expires_at": "2024-01-01T12:02:00Z"
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8080/api/v1/handles/h_abc123/renew?lease=120"
+```
+
+### Get Handle Info
+Get information about an open handle.
+
+**Endpoint:** `GET /api/v1/handles/{handle_id}`
+
+**Response:**
+```json
+{
+  "handle_id": "h_abc123",
+  "path": "/memfs/file.txt",
+  "flags": "readwrite",
+  "lease": 60,
+  "expires_at": "2024-01-01T12:01:00Z",
+  "created_at": "2024-01-01T12:00:00Z",
+  "last_access": "2024-01-01T12:00:30Z"
+}
+```
+
+**Example:**
+```bash
+curl "http://localhost:8080/api/v1/handles/h_abc123"
+```
+
+### Close Handle
+Close an open file handle.
+
+**Endpoint:** `DELETE /api/v1/handles/{handle_id}`
+
+**Response:**
+```json
+{
+  "message": "closed"
+}
+```
+
+**Example:**
+```bash
+curl -X DELETE "http://localhost:8080/api/v1/handles/h_abc123"
+```
+
+### List Handles
+List all active file handles (admin/debugging).
+
+**Endpoint:** `GET /api/v1/handles`
+
+**Response:**
+```json
+{
+  "handles": [
+    {
+      "handle_id": "h_abc123",
+      "path": "/memfs/file.txt",
+      "flags": "readwrite",
+      "expires_at": "2024-01-01T12:01:00Z"
+    }
+  ],
+  "count": 1,
+  "max": 10000
+}
+```
+
+**Example:**
+```bash
+curl "http://localhost:8080/api/v1/handles"
+```
+
+---
+
+## Advanced File Operations
+
+### Truncate File
+Truncate a file to a specified size.
+
+**Endpoint:** `POST /api/v1/truncate`
+
+**Query Parameters:**
+- `path` (required): Absolute path to the file.
+- `size` (required): New file size in bytes.
+
+**Response:**
+```json
+{
+  "message": "truncated"
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8080/api/v1/truncate?path=/memfs/file.txt&size=1024"
+```
+
+### Sync File
+Synchronize file data to storage (fsync).
+
+**Endpoint:** `POST /api/v1/sync`
+
+**Query Parameters:**
+- `path` (required): Absolute path to the file.
+
+**Response:**
+```json
+{
+  "message": "synced"
+}
+```
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8080/api/v1/sync?path=/memfs/file.txt"
 ```

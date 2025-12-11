@@ -126,8 +126,8 @@ func (fs *HelloFS) RemoveAll(path string) error {
 	return errors.New("read-only filesystem")
 }
 
-func (fs *HelloFS) Write(path string, data []byte) ([]byte, error) {
-	return nil, errors.New("read-only filesystem")
+func (fs *HelloFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
+	return 0, errors.New("read-only filesystem")
 }
 
 func (fs *HelloFS) Rename(oldPath, newPath string) error {

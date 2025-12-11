@@ -32,7 +32,7 @@ import (
 
 var (
 	// Version information, injected during build
-	Version   = "dev"
+	Version   = "1.4.0"
 	BuildTime = "unknown"
 	GitCommit = "unknown"
 )
@@ -171,7 +171,7 @@ func main() {
 
 	// Handle --print-sample-config
 	if *printSampleConfig {
-		fmt.Println(sampleConfig)
+		fmt.Print(sampleConfig)
 		return
 	}
 

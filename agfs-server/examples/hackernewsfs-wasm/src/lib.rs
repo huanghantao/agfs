@@ -272,12 +272,12 @@ impl FileSystem for HackerNewsFS {
         }
     }
 
-    fn write(&mut self, path: &str, _data: &[u8]) -> Result<Vec<u8>> {
+    fn write(&mut self, path: &str, _data: &[u8], _offset: i64, _flags: WriteFlag) -> Result<i64> {
         if path == "/refresh" {
             // Allow writing to refresh to trigger update
             self.fetch_top_stories()?;
             let msg = format!("Refreshed {} stories from Hacker News\n", self.stories.borrow().len());
-            Ok(msg.into_bytes())
+            Ok(msg.len() as i64)
         } else {
             Err(Error::PermissionDenied)
         }

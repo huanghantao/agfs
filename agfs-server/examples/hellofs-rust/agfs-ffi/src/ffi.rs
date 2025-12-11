@@ -3,7 +3,7 @@
 //! This module handles all C interop safely. All unsafe code is contained here.
 
 use crate::filesystem::FileSystem;
-use crate::types::FileInfo;
+use crate::types::{FileInfo, WriteFlag};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
@@ -387,26 +387,30 @@ pub fn fs_remove_all<T: FileSystem>(plugin: *mut c_void, path: *const c_char) ->
     }
 }
 
+/// Write to file with offset and flags
+/// Returns packed i64: positive = bytes written, negative = error (use last 32 bits as error pointer)
 pub fn fs_write<T: FileSystem>(
     plugin: *mut c_void,
     path: *const c_char,
     data: *const c_char,
     data_len: c_int,
-) -> *const c_char {
+    offset: i64,
+    flags: u32,
+) -> i64 {
     if plugin.is_null() {
-        return error_to_c_string("plugin is null");
+        return -1;
     }
 
     let path_str = unsafe {
         match c_str_to_str(path) {
             Ok(s) => s,
-            Err(e) => return error_to_c_string(e),
+            Err(_) => return -1,
         }
     };
 
     let data_slice = unsafe {
         if data.is_null() || data_len < 0 {
-            return error_to_c_string("invalid data");
+            return -1;
         }
         std::slice::from_raw_parts(data as *const u8, data_len as usize)
     };
@@ -414,9 +418,9 @@ pub fn fs_write<T: FileSystem>(
     unsafe {
         let wrapper = &*(plugin as *const PluginWrapper<T>);
         let fs = wrapper.fs.lock().unwrap();
-        match fs.write(path_str, data_slice) {
-            Ok(_) => success(),
-            Err(e) => error_to_c_string(&e.to_string()),
+        match fs.write(path_str, data_slice, offset, WriteFlag::from(flags)) {
+            Ok(bytes_written) => bytes_written,
+            Err(_) => -1,
         }
     }
 }

@@ -47,8 +47,8 @@ macro_rules! export_plugin {
             unsafe {
                 let p = PLUGIN.as_ref().expect("Not initialized");
                 let params = <$plugin_type as $crate::FileSystem>::config_params(p);
-                // Serialize to JSON
-                match serde_json::to_string(&params) {
+                // Serialize to JSON using crate's re-exported serde_json
+                match $crate::serde_json::to_string(&params) {
                     Ok(json) => CString::new(&json).into_raw(),
                     Err(_) => CString::new("[]").into_raw(),
                 }
@@ -166,24 +166,28 @@ macro_rules! export_plugin {
             }
         }
 
+        /// Write to file with offset and flags
+        /// Returns packed u64: high 32 bits = bytes written, low 32 bits = error ptr (0 = success)
         #[no_mangle]
-        pub extern "C" fn fs_write(path_ptr: *const u8, data_ptr: *const u8, size: usize) -> u64 {
-            use $crate::memory::{CString, Buffer, pack_u64};
+        pub extern "C" fn fs_write(path_ptr: *const u8, data_ptr: *const u8, size: usize, offset: i64, flags: u32) -> u64 {
+            use $crate::memory::{CString, pack_u64};
             use $crate::FileSystem;
+            use $crate::WriteFlag;
 
             let path = unsafe { CString::from_ptr(path_ptr) };
             let data = unsafe { std::slice::from_raw_parts(data_ptr, size) };
 
             unsafe {
                 let p = PLUGIN.as_mut().expect("Not initialized");
-                match <$plugin_type as $crate::FileSystem>::write(p, &path, data) {
-                    Ok(response) => {
-                        let len = response.len() as u32;
-                        let buffer = Buffer::from_bytes(&response);
-                        let ptr = buffer.into_raw() as u32;
-                        pack_u64(ptr, len)
+                match <$plugin_type as $crate::FileSystem>::write(p, &path, data, offset, WriteFlag::from(flags)) {
+                    Ok(bytes_written) => {
+                        // Pack bytes_written in high 32 bits, 0 (success) in low 32 bits
+                        pack_u64(bytes_written as u32, 0)
                     }
-                    Err(_) => 0,
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
                 }
             }
         }
@@ -323,6 +327,242 @@ macro_rules! export_plugin {
             unsafe {
                 let layout = Layout::from_size_align(size, 1).unwrap();
                 dealloc(ptr, layout);
+            }
+        }
+    };
+}
+
+/// Export a HandleFS implementation as a WASM plugin with handle support
+/// This macro exports all FileSystem functions plus HandleFS handle operations
+#[macro_export]
+macro_rules! export_handle_plugin {
+    ($plugin_type:ty) => {
+        // First export all the basic FileSystem functions
+        $crate::export_plugin!($plugin_type);
+
+        // Then add HandleFS-specific exports
+
+        /// Open a file handle
+        /// Returns packed u64: high 32 bits = handle_id pointer, low 32 bits = error ptr (0 = success)
+        #[no_mangle]
+        pub extern "C" fn handle_open(path_ptr: *const u8, flags: u32, mode: u32) -> u64 {
+            use $crate::memory::{CString, pack_u64};
+            use $crate::HandleFS;
+
+            let path = unsafe { CString::from_ptr(path_ptr) };
+
+            unsafe {
+                let p = PLUGIN.as_mut().expect("Not initialized");
+                match <$plugin_type as $crate::HandleFS>::open_handle(p, &path, $crate::OpenFlag::from(flags), mode) {
+                    Ok(id) => {
+                        let id_ptr = CString::new(&id).into_raw();
+                        pack_u64(id_ptr as u32, 0)
+                    }
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
+                }
+            }
+        }
+
+        /// Read from handle
+        /// Returns packed u64: high 32 bits = bytes read, low 32 bits = error ptr (0 = success)
+        #[no_mangle]
+        pub extern "C" fn handle_read(id_ptr: *const u8, buf_ptr: *mut u8, buf_size: usize) -> u64 {
+            use $crate::memory::{CString, pack_u64};
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+            let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_size) };
+
+            unsafe {
+                let p = PLUGIN.as_mut().expect("Not initialized");
+                match <$plugin_type as $crate::HandleFS>::handle_read(p, &id, buf) {
+                    Ok(n) => pack_u64(n as u32, 0),
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
+                }
+            }
+        }
+
+        /// Read from handle at offset (pread)
+        /// Returns packed u64: high 32 bits = bytes read, low 32 bits = error ptr (0 = success)
+        #[no_mangle]
+        pub extern "C" fn handle_read_at(id_ptr: *const u8, buf_ptr: *mut u8, buf_size: usize, offset: i64) -> u64 {
+            use $crate::memory::{CString, pack_u64};
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+            let buf = unsafe { std::slice::from_raw_parts_mut(buf_ptr, buf_size) };
+
+            unsafe {
+                let p = PLUGIN.as_ref().expect("Not initialized");
+                match <$plugin_type as $crate::HandleFS>::handle_read_at(p, &id, buf, offset) {
+                    Ok(n) => pack_u64(n as u32, 0),
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
+                }
+            }
+        }
+
+        /// Write to handle
+        /// Returns packed u64: high 32 bits = bytes written, low 32 bits = error ptr (0 = success)
+        #[no_mangle]
+        pub extern "C" fn handle_write(id_ptr: *const u8, data_ptr: *const u8, data_size: usize) -> u64 {
+            use $crate::memory::{CString, pack_u64};
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+            let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) };
+
+            unsafe {
+                let p = PLUGIN.as_mut().expect("Not initialized");
+                match <$plugin_type as $crate::HandleFS>::handle_write(p, &id, data) {
+                    Ok(n) => pack_u64(n as u32, 0),
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
+                }
+            }
+        }
+
+        /// Write to handle at offset (pwrite)
+        /// Returns packed u64: high 32 bits = bytes written, low 32 bits = error ptr (0 = success)
+        #[no_mangle]
+        pub extern "C" fn handle_write_at(id_ptr: *const u8, data_ptr: *const u8, data_size: usize, offset: i64) -> u64 {
+            use $crate::memory::{CString, pack_u64};
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+            let data = unsafe { std::slice::from_raw_parts(data_ptr, data_size) };
+
+            unsafe {
+                let p = PLUGIN.as_ref().expect("Not initialized");
+                match <$plugin_type as $crate::HandleFS>::handle_write_at(p, &id, data, offset) {
+                    Ok(n) => pack_u64(n as u32, 0),
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
+                }
+            }
+        }
+
+        /// Seek handle position
+        /// Returns packed u64: high 32 bits = new position (truncated), low 32 bits = error ptr (0 = success)
+        /// For full 64-bit position, use handle_seek64
+        #[no_mangle]
+        pub extern "C" fn handle_seek(id_ptr: *const u8, offset: i64, whence: i32) -> u64 {
+            use $crate::memory::{CString, pack_u64};
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+
+            unsafe {
+                let p = PLUGIN.as_mut().expect("Not initialized");
+                match <$plugin_type as $crate::HandleFS>::handle_seek(p, &id, offset, whence) {
+                    Ok(pos) => pack_u64(pos as u32, 0),
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
+                }
+            }
+        }
+
+        /// Sync handle data
+        /// Returns error pointer (0 = success)
+        #[no_mangle]
+        pub extern "C" fn handle_sync(id_ptr: *const u8) -> *mut u8 {
+            use $crate::memory::CString;
+            use $crate::ffi::result_to_error_ptr;
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+
+            unsafe {
+                let p = PLUGIN.as_ref().expect("Not initialized");
+                result_to_error_ptr::<()>(<$plugin_type as $crate::HandleFS>::handle_sync(p, &id))
+            }
+        }
+
+        /// Stat via handle
+        /// Returns packed u64: high 32 bits = json pointer, low 32 bits = error ptr
+        #[no_mangle]
+        pub extern "C" fn handle_stat(id_ptr: *const u8) -> u64 {
+            use $crate::memory::{CString, pack_u64};
+            use $crate::ffi::fileinfo_to_json_ptr;
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+
+            unsafe {
+                let p = PLUGIN.as_ref().expect("Not initialized");
+                match <$plugin_type as $crate::HandleFS>::handle_stat(p, &id) {
+                    Ok(info) => match fileinfo_to_json_ptr(&info) {
+                        Ok(json_ptr) => pack_u64(json_ptr as u32, 0),
+                        Err(e) => {
+                            let err_ptr = CString::new(&e.to_string()).into_raw();
+                            pack_u64(0, err_ptr as u32)
+                        }
+                    },
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
+                }
+            }
+        }
+
+        /// Get handle info (path, flags)
+        /// Returns packed u64: high 32 bits = json pointer, low 32 bits = error ptr
+        #[no_mangle]
+        pub extern "C" fn handle_info(id_ptr: *const u8) -> u64 {
+            use $crate::memory::{CString, pack_u64};
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+
+            unsafe {
+                let p = PLUGIN.as_ref().expect("Not initialized");
+                match <$plugin_type as $crate::HandleFS>::handle_info(p, &id) {
+                    Ok((path, flags)) => {
+                        // Return JSON with path and flags
+                        let json = $crate::serde_json::json!({
+                            "path": path,
+                            "flags": flags.0
+                        });
+                        let json_str = json.to_string();
+                        let json_ptr = CString::new(&json_str).into_raw();
+                        pack_u64(json_ptr as u32, 0)
+                    }
+                    Err(e) => {
+                        let err_ptr = CString::new(&e.to_string()).into_raw();
+                        pack_u64(0, err_ptr as u32)
+                    }
+                }
+            }
+        }
+
+        /// Close handle
+        /// Returns error pointer (0 = success)
+        #[no_mangle]
+        pub extern "C" fn handle_close(id_ptr: *const u8) -> *mut u8 {
+            use $crate::memory::CString;
+            use $crate::ffi::result_to_error_ptr;
+            use $crate::HandleFS;
+
+            let id = unsafe { CString::from_ptr(id_ptr) };
+
+            unsafe {
+                let p = PLUGIN.as_mut().expect("Not initialized");
+                result_to_error_ptr::<()>(<$plugin_type as $crate::HandleFS>::close_handle(p, &id))
             }
         }
     };

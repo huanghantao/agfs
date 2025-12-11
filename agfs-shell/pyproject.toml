@@ -12,7 +12,7 @@ authors = [
     { name = "agfs authors" }
 ]
 dependencies = [
-    "pyagfs>=0.1.5",
+    "pyagfs>=1.4.0",
     "rich",
     "jq",
     "llm",

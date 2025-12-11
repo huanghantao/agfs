@@ -1,6 +1,6 @@
 [package]
 name = "agfs-ffi"
-version = "0.1.0"
+version = "1.4.0"
 edition = "2021"
 authors = ["AGFS Contributors"]
 description = "FFI bindings for building AGFS filesystem plugins in Rust"

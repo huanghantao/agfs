@@ -258,6 +258,50 @@ public:
     }
 };
 
+/// Write flags for file operations (matches Go filesystem.WriteFlag)
+class WriteFlag {
+public:
+    uint32_t value;
+
+    WriteFlag() : value(0) {}
+    explicit WriteFlag(uint32_t v) : value(v) {}
+
+    /// No special flags (default overwrite)
+    static const WriteFlag NONE;
+    /// Append mode - write at end of file
+    static const WriteFlag APPEND;
+    /// Create file if it doesn't exist
+    static const WriteFlag CREATE;
+    /// Fail if file already exists (used with CREATE)
+    static const WriteFlag EXCLUSIVE;
+    /// Truncate file before writing
+    static const WriteFlag TRUNCATE;
+    /// Sync after write
+    static const WriteFlag SYNC;
+
+    /// Check if a flag is set
+    bool contains(WriteFlag flag) const {
+        return (value & flag.value) != 0;
+    }
+
+    /// Combine flags
+    WriteFlag with(WriteFlag flag) const {
+        return WriteFlag(value | flag.value);
+    }
+
+    WriteFlag operator|(WriteFlag other) const {
+        return WriteFlag(value | other.value);
+    }
+};
+
+// Define static constants
+inline const WriteFlag WriteFlag::NONE = WriteFlag(0);
+inline const WriteFlag WriteFlag::APPEND = WriteFlag(1 << 0);
+inline const WriteFlag WriteFlag::CREATE = WriteFlag(1 << 1);
+inline const WriteFlag WriteFlag::EXCLUSIVE = WriteFlag(1 << 2);
+inline const WriteFlag WriteFlag::TRUNCATE = WriteFlag(1 << 3);
+inline const WriteFlag WriteFlag::SYNC = WriteFlag(1 << 4);
+
 } // namespace agfs
 
 #endif // AGFS_TYPES_H

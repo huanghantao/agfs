@@ -236,7 +236,7 @@ func (fs *LocalFS) Read(path string, offset int64, size int64) ([]byte, error) {
 	return data[:n], nil
 }
 
-func (fs *LocalFS) Write(path string, data []byte) ([]byte, error) {
+func (fs *LocalFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	localPath := fs.resolvePath(path)
 
 	fs.mu.Lock()
@@ -244,22 +244,59 @@ func (fs *LocalFS) Write(path string, data []byte) ([]byte, error) {
 
 	// Check if it's a directory
 	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
-		return nil, fmt.Errorf("is a directory: %s", path)
+		return 0, fmt.Errorf("is a directory: %s", path)
 	}
 
 	// Check if parent directory exists
 	parentDir := filepath.Dir(localPath)
 	if _, err := os.Stat(parentDir); os.IsNotExist(err) {
-		return nil, fmt.Errorf("parent directory does not exist: %s", filepath.Dir(path))
+		return 0, fmt.Errorf("parent directory does not exist: %s", filepath.Dir(path))
 	}
 
-	// Write to file (create if not exists, truncate if exists)
-	err := os.WriteFile(localPath, data, 0644)
+	// Build open flags
+	openFlags := os.O_WRONLY
+	if flags&filesystem.WriteFlagCreate != 0 {
+		openFlags |= os.O_CREATE
+	}
+	if flags&filesystem.WriteFlagExclusive != 0 {
+		openFlags |= os.O_EXCL
+	}
+	if flags&filesystem.WriteFlagTruncate != 0 {
+		openFlags |= os.O_TRUNC
+	}
+	if flags&filesystem.WriteFlagAppend != 0 {
+		openFlags |= os.O_APPEND
+	}
+
+	// Default behavior: create and truncate (like the old implementation)
+	if flags == filesystem.WriteFlagNone && offset < 0 {
+		openFlags |= os.O_CREATE | os.O_TRUNC
+	}
+
+	f, err := os.OpenFile(localPath, openFlags, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("failed to write file: %w", err)
+		return 0, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer f.Close()
+
+	var n int
+	if offset >= 0 && flags&filesystem.WriteFlagAppend == 0 {
+		// pwrite: write at specific offset
+		n, err = f.WriteAt(data, offset)
+	} else {
+		// Normal write or append
+		n, err = f.Write(data)
 	}
 
-	return []byte(fmt.Sprintf("Written %d bytes to %s", len(data), path)), nil
+	if err != nil {
+		return 0, fmt.Errorf("failed to write: %w", err)
+	}
+
+	if flags&filesystem.WriteFlagSync != 0 {
+		f.Sync()
+	}
+
+	return int64(n), nil
 }
 
 func (fs *LocalFS) ReadDir(path string) ([]filesystem.FileInfo, error) {

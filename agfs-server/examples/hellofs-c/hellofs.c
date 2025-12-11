@@ -179,8 +179,20 @@ const char* FSRemoveAll(void* plugin, const char* path) {
     return "operation not supported: read-only filesystem";
 }
 
-const char* FSWrite(void* plugin, const char* path, const char* data, int data_len) {
-    return "operation not supported: read-only filesystem";
+// Write flags (matches Go filesystem.WriteFlag)
+#define WRITE_FLAG_NONE      0
+#define WRITE_FLAG_APPEND    (1 << 0)
+#define WRITE_FLAG_CREATE    (1 << 1)
+#define WRITE_FLAG_EXCLUSIVE (1 << 2)
+#define WRITE_FLAG_TRUNCATE  (1 << 3)
+#define WRITE_FLAG_SYNC      (1 << 4)
+
+// FSWrite with offset and flags
+// Returns: positive = bytes written, negative = error
+int64_t FSWrite(void* plugin, const char* path, const char* data, int data_len, int64_t offset, uint32_t flags) {
+    (void)plugin; (void)path; (void)data; (void)data_len; (void)offset; (void)flags;
+    // Read-only filesystem - return -1 for error
+    return -1;
 }
 
 const char* FSRename(void* plugin, const char* old_path, const char* new_path) {

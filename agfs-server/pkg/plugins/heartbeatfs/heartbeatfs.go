@@ -438,14 +438,14 @@ func (hfs *heartbeatFS) Read(path string, offset int64, size int64) ([]byte, err
 	return plugin.ApplyRangeRead(data, offset, size)
 }
 
-func (hfs *heartbeatFS) Write(path string, data []byte) ([]byte, error) {
+func (hfs *heartbeatFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	if path == "/" {
-		return nil, fmt.Errorf("cannot write to directory")
+		return 0, fmt.Errorf("cannot write to directory")
 	}
 
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid path: %s", path)
+		return 0, fmt.Errorf("invalid path: %s", path)
 	}
 
 	name := parts[0]
@@ -456,7 +456,7 @@ func (hfs *heartbeatFS) Write(path string, data []byte) ([]byte, error) {
 	hfs.plugin.mu.RUnlock()
 
 	if !exists {
-		return nil, fmt.Errorf("heartbeat item not found: %s", name)
+		return 0, fmt.Errorf("heartbeat item not found: %s", name)
 	}
 
 	now := time.Now()
@@ -485,10 +485,10 @@ func (hfs *heartbeatFS) Write(path string, data []byte) ([]byte, error) {
 		var newTimeout int
 		_, err := fmt.Sscanf(content, "timeout=%d", &newTimeout)
 		if err != nil {
-			return nil, fmt.Errorf("invalid ctl command, use 'timeout=N' (seconds)")
+			return 0, fmt.Errorf("invalid ctl command, use 'timeout=N' (seconds)")
 		}
 		if newTimeout <= 0 {
-			return nil, fmt.Errorf("timeout must be positive")
+			return 0, fmt.Errorf("timeout must be positive")
 		}
 
 		// Update timeout and recalculate expire time
@@ -509,10 +509,10 @@ func (hfs *heartbeatFS) Write(path string, data []byte) ([]byte, error) {
 		hfs.plugin.heapMu.Unlock()
 
 	default:
-		return nil, fmt.Errorf("can only write to keepalive or ctl files")
+		return 0, fmt.Errorf("can only write to keepalive or ctl files")
 	}
 
-	return nil, nil
+	return int64(len(data)), nil
 }
 
 func (hfs *heartbeatFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -724,7 +724,7 @@ func (hw *heartbeatWriter) Write(p []byte) (n int, err error) {
 }
 
 func (hw *heartbeatWriter) Close() error {
-	_, err := hw.hfs.Write(hw.path, hw.buf.Bytes())
+	_, err := hw.hfs.Write(hw.path, hw.buf.Bytes(), -1, filesystem.WriteFlagNone)
 	return err
 }
 

@@ -567,10 +567,10 @@ func (srf *StreamRotateFS) Read(path string, offset int64, size int64) ([]byte, 
 	return nil, fmt.Errorf("use stream mode for reading stream files")
 }
 
-func (srf *StreamRotateFS) Write(path string, data []byte) ([]byte, error) {
+func (srf *StreamRotateFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	// Prevent writing to README (reserved for documentation)
 	if path == "/README" {
-		return nil, fmt.Errorf("cannot write to README: reserved for documentation, use regular read mode")
+		return 0, fmt.Errorf("cannot write to README: reserved for documentation, use regular read mode")
 	}
 
 	srf.mu.Lock()
@@ -581,12 +581,13 @@ func (srf *StreamRotateFS) Write(path string, data []byte) ([]byte, error) {
 	}
 	srf.mu.Unlock()
 
+	// StreamRotateFS is append-only (broadcast), offset is ignored
 	err := stream.Write(data)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	return []byte(fmt.Sprintf("Written %d bytes to rotate stream", len(data))), nil
+	return int64(len(data)), nil
 }
 
 func (srf *StreamRotateFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -724,7 +725,7 @@ type streamWriter struct {
 }
 
 func (sw *streamWriter) Write(p []byte) (n int, err error) {
-	_, err = sw.srf.Write(sw.path, p)
+	_, err = sw.srf.Write(sw.path, p, -1, filesystem.WriteFlagAppend)
 	if err != nil {
 		return 0, err
 	}

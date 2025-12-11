@@ -234,7 +234,9 @@ class Pipeline:
         # Use streaming pipeline for multi-process pipelines
         if self.use_streaming:
             streaming_pipeline = StreamingPipeline(self.processes)
-            return streaming_pipeline.execute()
+            exit_code = streaming_pipeline.execute()
+            self.exit_codes = streaming_pipeline.exit_codes
+            return exit_code
 
         # Single process: execute directly (buffered)
         if not self.processes:

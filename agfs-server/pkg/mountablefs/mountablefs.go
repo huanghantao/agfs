@@ -42,6 +42,10 @@ type MountableFS struct {
 	pluginLoader       *loader.PluginLoader // For loading external plugins
 	pluginNameCounters map[string]int       // Track counters for plugin names
 	mu                 sync.RWMutex         // Protects write operations (Mount/Unmount) and plugin factories
+
+	// handleMounts maps handle IDs to their mount points for HandleFS operations
+	handleMounts   map[int64]*MountPoint
+	handleMountsMu sync.RWMutex
 }
 
 // NewMountableFS creates a new mountable file system with the specified WASM pool configuration
@@ -50,6 +54,7 @@ func NewMountableFS(poolConfig api.PoolConfig) *MountableFS {
 		pluginFactories:    make(map[string]PluginFactory),
 		pluginLoader:       loader.NewPluginLoader(poolConfig),
 		pluginNameCounters: make(map[string]int),
+		handleMounts:       make(map[int64]*MountPoint),
 	}
 	mfs.mountTree.Store(iradix.New())
 	return mfs
@@ -488,13 +493,13 @@ func (mfs *MountableFS) Read(path string, offset int64, size int64) ([]byte, err
 	return nil, filesystem.NewNotFoundError("read", path)
 }
 
-func (mfs *MountableFS) Write(path string, data []byte) ([]byte, error) {
+func (mfs *MountableFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	mount, relPath, found := mfs.findMount(path)
 
 	if found {
-		return mount.Plugin.GetFileSystem().Write(relPath, data)
+		return mount.Plugin.GetFileSystem().Write(relPath, data, offset, flags)
 	}
-	return nil, filesystem.NewNotFoundError("write", path)
+	return 0, filesystem.NewNotFoundError("write", path)
 }
 
 func (mfs *MountableFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -721,12 +726,12 @@ func (mfs *MountableFS) Touch(path string) error {
 				if readErr != nil {
 					return readErr
 				}
-				_, writeErr := fs.Write(relPath, data)
+				_, writeErr := fs.Write(relPath, data, -1, filesystem.WriteFlagNone)
 				return writeErr
 			}
 			return fmt.Errorf("cannot touch directory")
 		} else {
-			_, err := fs.Write(relPath, []byte{})
+			_, err := fs.Write(relPath, []byte{}, -1, filesystem.WriteFlagCreate)
 			return err
 		}
 	}
@@ -791,3 +796,112 @@ func (mfs *MountableFS) GetStream(path string) (interface{}, error) {
 	log.Warnf("[mountablefs] GetStream: filesystem does not support streaming: %s (fs type: %T)", path, fs)
 	return nil, fmt.Errorf("filesystem does not support streaming: %s", path)
 }
+
+// ============================================================================
+// HandleFS Implementation
+// ============================================================================
+
+// OpenHandle opens a file and returns a handle for stateful operations
+// This delegates to the underlying filesystem if it supports HandleFS
+func (mfs *MountableFS) OpenHandle(path string, flags filesystem.OpenFlag, mode uint32) (filesystem.FileHandle, error) {
+	mount, relPath, found := mfs.findMount(path)
+
+	if !found {
+		return nil, filesystem.NewNotFoundError("openhandle", path)
+	}
+
+	fs := mount.Plugin.GetFileSystem()
+	handleFS, ok := fs.(filesystem.HandleFS)
+	if !ok {
+		return nil, fmt.Errorf("filesystem at %s does not support file handles", mount.Path)
+	}
+
+	handle, err := handleFS.OpenHandle(relPath, flags, mode)
+	if err != nil {
+		return nil, err
+	}
+
+	// Register handle -> mount mapping
+	mfs.handleMountsMu.Lock()
+	mfs.handleMounts[handle.ID()] = mount
+	mfs.handleMountsMu.Unlock()
+
+	// Wrap handle to track path correctly
+	return &mountedFileHandle{
+		FileHandle: handle,
+		mountPath:  mount.Path,
+		fullPath:   path,
+	}, nil
+}
+
+// GetHandle retrieves an existing handle by its ID
+func (mfs *MountableFS) GetHandle(id int64) (filesystem.FileHandle, error) {
+	// Find mount for this handle
+	mfs.handleMountsMu.RLock()
+	mount, found := mfs.handleMounts[id]
+	mfs.handleMountsMu.RUnlock()
+
+	if !found {
+		return nil, filesystem.ErrNotFound
+	}
+
+	fs := mount.Plugin.GetFileSystem()
+	handleFS, ok := fs.(filesystem.HandleFS)
+	if !ok {
+		return nil, fmt.Errorf("filesystem at %s does not support file handles", mount.Path)
+	}
+
+	handle, err := handleFS.GetHandle(id)
+	if err != nil {
+		return nil, err
+	}
+
+	return &mountedFileHandle{
+		FileHandle: handle,
+		mountPath:  mount.Path,
+		fullPath:   mount.Path + handle.Path(),
+	}, nil
+}
+
+// CloseHandle closes a handle by its ID
+func (mfs *MountableFS) CloseHandle(id int64) error {
+	// Find mount for this handle
+	mfs.handleMountsMu.RLock()
+	mount, found := mfs.handleMounts[id]
+	mfs.handleMountsMu.RUnlock()
+
+	if !found {
+		return filesystem.ErrNotFound
+	}
+
+	fs := mount.Plugin.GetFileSystem()
+	handleFS, ok := fs.(filesystem.HandleFS)
+	if !ok {
+		return fmt.Errorf("filesystem at %s does not support file handles", mount.Path)
+	}
+
+	err := handleFS.CloseHandle(id)
+	if err == nil {
+		// Remove from mapping
+		mfs.handleMountsMu.Lock()
+		delete(mfs.handleMounts, id)
+		mfs.handleMountsMu.Unlock()
+	}
+
+	return err
+}
+
+// mountedFileHandle wraps a FileHandle to provide full path information
+type mountedFileHandle struct {
+	filesystem.FileHandle
+	mountPath string
+	fullPath  string
+}
+
+// Path returns the full path (including mount point)
+func (h *mountedFileHandle) Path() string {
+	return h.fullPath
+}
+
+// Ensure MountableFS implements HandleFS interface
+var _ filesystem.HandleFS = (*MountableFS)(nil)

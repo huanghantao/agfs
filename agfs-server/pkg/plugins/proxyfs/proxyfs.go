@@ -101,15 +101,22 @@ func (p *ProxyFS) Read(path string, offset int64, size int64) ([]byte, error) {
 	return p.client.Load().Read(path, offset, size)
 }
 
-func (p *ProxyFS) Write(path string, data []byte) ([]byte, error) {
+func (p *ProxyFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	// Special handling for /reload - trigger hot reload
 	if path == "/reload" {
 		if err := p.Reload(); err != nil {
-			return nil, fmt.Errorf("reload failed: %w", err)
+			return 0, fmt.Errorf("reload failed: %w", err)
 		}
-		return []byte("ProxyFS reloaded successfully"), nil
+		return int64(len(data)), nil
 	}
-	return p.client.Load().Write(path, data)
+	// Note: SDK client doesn't support new Write signature yet
+	// For now, we ignore offset and flags and use the legacy method
+	// TODO: Update SDK to support new Write signature
+	_, err := p.client.Load().Write(path, data)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(data)), nil
 }
 
 func (p *ProxyFS) ReadDir(path string) ([]filesystem.FileInfo, error) {

@@ -74,22 +74,15 @@ func HostFSWrite(ctx context.Context, mod wazeroapi.Module, params []uint64, fs 
 		return []uint64{0}
 	}
 
-	response, err := fs.Write(path, data)
+	// Note: WASM API doesn't support offset/flags yet, use default behavior
+	bytesWritten, err := fs.Write(path, data, -1, filesystem.WriteFlagCreate|filesystem.WriteFlagTruncate)
 	if err != nil {
 		log.Errorf("host_fs_write: error writing file: %v", err)
 		return []uint64{0}
 	}
 
-	// Write response to WASM memory
-	responsePtr, _, err := writeBytesToMemory(mod, response)
-	if err != nil {
-		log.Errorf("host_fs_write: failed to write response to memory: %v", err)
-		return []uint64{0}
-	}
-
-	// Pack pointer and size
-	packed := uint64(responsePtr) | (uint64(len(response)) << 32)
-	return []uint64{packed}
+	// Return bytes written as uint64
+	return []uint64{uint64(bytesWritten)}
 }
 
 func HostFSStat(ctx context.Context, mod wazeroapi.Module, params []uint64, fs filesystem.FileSystem) []uint64 {

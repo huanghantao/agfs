@@ -114,6 +114,47 @@ pub fn current_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+/// Write flags for file operations (matches Go filesystem.WriteFlag)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteFlag(pub u32);
+
+impl WriteFlag {
+    /// No special flags (default overwrite)
+    pub const NONE: WriteFlag = WriteFlag(0);
+    /// Append mode - write at end of file
+    pub const APPEND: WriteFlag = WriteFlag(1 << 0);
+    /// Create file if it doesn't exist
+    pub const CREATE: WriteFlag = WriteFlag(1 << 1);
+    /// Fail if file already exists (used with CREATE)
+    pub const EXCLUSIVE: WriteFlag = WriteFlag(1 << 2);
+    /// Truncate file before writing
+    pub const TRUNCATE: WriteFlag = WriteFlag(1 << 3);
+    /// Sync after write
+    pub const SYNC: WriteFlag = WriteFlag(1 << 4);
+
+    /// Check if a flag is set
+    pub fn contains(&self, flag: WriteFlag) -> bool {
+        (self.0 & flag.0) != 0
+    }
+
+    /// Combine flags
+    pub fn with(&self, flag: WriteFlag) -> WriteFlag {
+        WriteFlag(self.0 | flag.0)
+    }
+}
+
+impl From<u32> for WriteFlag {
+    fn from(value: u32) -> Self {
+        WriteFlag(value)
+    }
+}
+
+impl From<WriteFlag> for u32 {
+    fn from(value: WriteFlag) -> Self {
+        value.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

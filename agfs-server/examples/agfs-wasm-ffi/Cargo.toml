@@ -1,6 +1,6 @@
 [package]
 name = "agfs-wasm-ffi"
-version = "0.1.0"
+version = "1.4.0"
 edition = "2021"
 authors = ["AGFS Contributors"]
 description = "Safe Rust SDK for building AGFS WASM plugins"

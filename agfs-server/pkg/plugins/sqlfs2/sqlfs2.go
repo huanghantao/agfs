@@ -305,39 +305,39 @@ func (fs *sqlfs2FS) Read(path string, offset int64, size int64) ([]byte, error) 
 	return nil, filesystem.NewInvalidArgumentError("path", path, "is a directory")
 }
 
-func (fs *sqlfs2FS) Write(path string, data []byte) ([]byte, error) {
+func (fs *sqlfs2FS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	dbName, tableName, operation, err := fs.parsePath(path)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	if operation == "" {
-		return nil, fmt.Errorf("cannot write to directory: %s", path)
+		return 0, fmt.Errorf("cannot write to directory: %s", path)
 	}
 
 	if operation == "schema" || operation == "count" {
-		return nil, fmt.Errorf("%s is read-only", operation)
+		return 0, fmt.Errorf("%s is read-only", operation)
 	}
 
 	// Switch to database if needed
 	if err := fs.plugin.backend.SwitchDatabase(fs.plugin.db, dbName); err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	// Handle insert_json operation
 	if operation == "insert_json" {
 		if dbName == "" || tableName == "" {
-			return nil, fmt.Errorf("invalid path for insert_json: %s", path)
+			return 0, fmt.Errorf("invalid path for insert_json: %s", path)
 		}
 
 		// Get table columns
 		columns, err := fs.plugin.backend.GetTableColumns(fs.plugin.db, dbName, tableName)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get table columns: %w", err)
+			return 0, fmt.Errorf("failed to get table columns: %w", err)
 		}
 
 		if len(columns) == 0 {
-			return nil, fmt.Errorf("no columns found for table %s", tableName)
+			return 0, fmt.Errorf("no columns found for table %s", tableName)
 		}
 
 		// Build column names list
@@ -398,7 +398,7 @@ func (fs *sqlfs2FS) Write(path string, data []byte) ([]byte, error) {
 			// Normal mode: parse as single JSON or JSON array
 			var jsonData interface{}
 			if err := json.Unmarshal(data, &jsonData); err != nil {
-				return nil, fmt.Errorf("invalid JSON: %w", err)
+				return 0, fmt.Errorf("invalid JSON: %w", err)
 			}
 
 			// Handle both single object and array of objects
@@ -412,19 +412,19 @@ func (fs *sqlfs2FS) Write(path string, data []byte) ([]byte, error) {
 					if record, ok := item.(map[string]interface{}); ok {
 						records = append(records, record)
 					} else {
-						return nil, fmt.Errorf("element at index %d is not a JSON object", i)
+						return 0, fmt.Errorf("element at index %d is not a JSON object", i)
 					}
 				}
 			default:
-				return nil, fmt.Errorf("JSON must be an object or array of objects")
+				return 0, fmt.Errorf("JSON must be an object or array of objects")
 			}
 		}
 
 		if len(records) == 0 {
 			if len(streamErrors) > 0 {
-				return nil, fmt.Errorf("no valid records found. Errors: %s", strings.Join(streamErrors, "; "))
+				return 0, fmt.Errorf("no valid records found. Errors: %s", strings.Join(streamErrors, "; "))
 			}
-			return nil, fmt.Errorf("no records to insert")
+			return 0, fmt.Errorf("no records to insert")
 		}
 
 		// Execute inserts
@@ -461,124 +461,53 @@ func (fs *sqlfs2FS) Write(path string, data []byte) ([]byte, error) {
 				insertErrors = append(insertErrors, fmt.Sprintf("record %d: %v", idx+1, err))
 				// In stream mode, continue on error; in normal mode, fail fast
 				if !isStreamMode {
-					return nil, fmt.Errorf("insert error at record %d: %w", idx+1, err)
+					return 0, fmt.Errorf("insert error at record %d: %w", idx+1, err)
 				}
 				continue
 			}
 			insertedCount++
 		}
 
-		// Return success response
-		response := map[string]interface{}{
-			"inserted_count": insertedCount,
-			"mode":           "normal",
-		}
-
-		if isStreamMode {
-			response["mode"] = "stream"
-			response["total_lines"] = len(lines)
-			if failedCount > 0 {
-				response["failed_count"] = failedCount
-				response["errors"] = insertErrors
-			}
-			if len(streamErrors) > 0 {
-				response["parse_errors"] = streamErrors
-			}
-		}
-
-		output, err := json.MarshalIndent(response, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal response: %w", err)
-		}
-
-		return output, nil
+		// Note: Response JSON is no longer returned via Write
+		// Clients should use other mechanisms if they need detailed results
+		return int64(len(data)), nil
 	}
 
 	sqlStmt := strings.TrimSpace(string(data))
 	if sqlStmt == "" {
-		return nil, fmt.Errorf("empty SQL statement")
+		return 0, fmt.Errorf("empty SQL statement")
 	}
 
 	if operation == "query" {
 		// Execute SELECT queries
 		rows, err := fs.plugin.db.Query(sqlStmt)
 		if err != nil {
-			return nil, fmt.Errorf("query error: %w", err)
+			return 0, fmt.Errorf("query error: %w", err)
 		}
 		defer rows.Close()
 
-		// Get column names
-		columns, err := rows.Columns()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get columns: %w", err)
-		}
-
-		// Collect results
-		var results []map[string]interface{}
+		// Just iterate to validate the query executes
 		for rows.Next() {
-			// Create a slice of interface{} to hold each column value
-			values := make([]interface{}, len(columns))
-			valuePtrs := make([]interface{}, len(columns))
-			for i := range values {
-				valuePtrs[i] = &values[i]
-			}
-
-			if err := rows.Scan(valuePtrs...); err != nil {
-				return nil, fmt.Errorf("failed to scan row: %w", err)
-			}
-
-			// Create a map for this row
-			rowMap := make(map[string]interface{})
-			for i, colName := range columns {
-				val := values[i]
-				// Convert []byte to string for better JSON representation
-				if b, ok := val.([]byte); ok {
-					rowMap[colName] = string(b)
-				} else {
-					rowMap[colName] = val
-				}
-			}
-			results = append(results, rowMap)
+			// Skip result processing - clients should use Read for query results
 		}
 
 		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("rows iteration error: %w", err)
+			return 0, fmt.Errorf("rows iteration error: %w", err)
 		}
 
-		// Format as JSON
-		output, err := json.MarshalIndent(results, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal results: %w", err)
-		}
-
-		return output, nil
+		return int64(len(data)), nil
 
 	} else if operation == "execute" {
 		// Execute DML statements (INSERT, UPDATE, DELETE)
-		result, err := fs.plugin.db.Exec(sqlStmt)
+		_, err := fs.plugin.db.Exec(sqlStmt)
 		if err != nil {
-			return nil, fmt.Errorf("execution error: %w", err)
+			return 0, fmt.Errorf("execution error: %w", err)
 		}
 
-		rowsAffected, _ := result.RowsAffected()
-		lastInsertId, _ := result.LastInsertId()
-
-		response := map[string]interface{}{
-			"rows_affected": rowsAffected,
-		}
-		if lastInsertId > 0 {
-			response["last_insert_id"] = lastInsertId
-		}
-
-		output, err := json.MarshalIndent(response, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal response: %w", err)
-		}
-
-		return output, nil
+		return int64(len(data)), nil
 	}
 
-	return nil, fmt.Errorf("unknown operation: %s", operation)
+	return 0, fmt.Errorf("unknown operation: %s", operation)
 }
 
 func (fs *sqlfs2FS) Create(path string) error {

@@ -543,34 +543,38 @@ func (qfs *queueFS) Read(path string, offset int64, size int64) ([]byte, error) 
 	return plugin.ApplyRangeRead(data, offset, size)
 }
 
-func (qfs *queueFS) Write(path string, data []byte) ([]byte, error) {
+func (qfs *queueFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	queueName, operation, isDir, err := parseQueuePath(path)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	if isDir {
-		return nil, fmt.Errorf("is a directory: %s", path)
+		return 0, fmt.Errorf("is a directory: %s", path)
 	}
 
 	if operation == "" {
-		return nil, fmt.Errorf("cannot write to: %s", path)
+		return 0, fmt.Errorf("cannot write to: %s", path)
 	}
 
+	// QueueFS is append-only for enqueue, offset is ignored
 	switch operation {
 	case "enqueue":
-		msgID, err := qfs.enqueue(queueName, data)
+		// TODO: ignore the enqueue content to fit the FS interface
+		_, err := qfs.enqueue(queueName, data)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		return msgID, nil
+		// Note: msgID is no longer returned via Write return value
+		// Clients should use other mechanisms (e.g., response headers) if needed
+		return int64(len(data)), nil
 	case "clear":
 		if err := qfs.clear(queueName); err != nil {
-			return nil, err
+			return 0, err
 		}
-		return []byte("OK"), nil
+		return 0, nil
 	default:
-		return nil, fmt.Errorf("cannot write to: %s", path)
+		return 0, fmt.Errorf("cannot write to: %s", path)
 	}
 }
 
@@ -724,7 +728,7 @@ func (qfs *queueFS) getQueueControlFiles(queueName string, now time.Time) ([]fil
 		{
 			Name:    "peek",
 			Size:    0,
-			Mode:    0444,             // read-only
+			Mode:    0444,            // read-only
 			ModTime: lastEnqueueTime, // Use last enqueue time for poll offset tracking
 			IsDir:   false,
 			Meta:    filesystem.MetaData{Name: PluginName, Type: MetaValueQueueControl},
@@ -873,7 +877,7 @@ func (qw *queueWriter) Write(p []byte) (n int, err error) {
 }
 
 func (qw *queueWriter) Close() error {
-	_, err := qw.qfs.Write(qw.path, qw.buf.Bytes())
+	_, err := qw.qfs.Write(qw.path, qw.buf.Bytes(), -1, filesystem.WriteFlagAppend)
 	return err
 }
 

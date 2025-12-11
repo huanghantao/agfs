@@ -52,7 +52,7 @@ func (p *MemFSPlugin) Initialize(config map[string]interface{}) error {
 	// Create README file
 	readme := []byte(p.GetReadme())
 	_ = p.fs.Create("/README")
-	_, _ = p.fs.Write("/README", readme)
+	_, _ = p.fs.Write("/README", readme, -1, filesystem.WriteFlagTruncate)
 	_ = p.fs.Chmod("/README", 0444) // Make it read-only
 
 	// Initialize with some default directories if needed

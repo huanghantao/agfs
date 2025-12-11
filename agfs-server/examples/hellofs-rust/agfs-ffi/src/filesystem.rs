@@ -1,7 +1,7 @@
 //! FileSystem trait definition
 
 use crate::error::{FileSystemError, Result};
-use crate::types::FileInfo;
+use crate::types::{FileInfo, WriteFlag};
 
 /// Main trait that all filesystem plugins must implement
 ///
@@ -115,8 +115,17 @@ pub trait FileSystem: Default + Send + Sync {
 
     /// Write data to a file
     ///
+    /// # Arguments
+    /// * `path` - The file path
+    /// * `data` - Data to write
+    /// * `offset` - Position to write at (-1 for append mode behavior)
+    /// * `flags` - Write flags (CREATE, TRUNCATE, APPEND, etc.)
+    ///
+    /// # Returns
+    /// Number of bytes written
+    ///
     /// Default implementation returns ReadOnly error.
-    fn write(&self, _path: &str, _data: &[u8]) -> Result<()> {
+    fn write(&self, _path: &str, _data: &[u8], _offset: i64, _flags: WriteFlag) -> Result<i64> {
         Err(FileSystemError::ReadOnly)
     }
 
@@ -219,7 +228,7 @@ mod tests {
     #[test]
     fn test_default_readonly_operations() {
         let fs = TestFS::default();
-        assert!(matches!(fs.write("/test", b"data"), Err(FileSystemError::ReadOnly)));
+        assert!(matches!(fs.write("/test", b"data", 0, WriteFlag::NONE), Err(FileSystemError::ReadOnly)));
         assert!(matches!(fs.create("/new"), Err(FileSystemError::ReadOnly)));
         assert!(matches!(fs.mkdir("/dir", 0o755), Err(FileSystemError::ReadOnly)));
     }

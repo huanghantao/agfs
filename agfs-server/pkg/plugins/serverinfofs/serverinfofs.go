@@ -250,8 +250,8 @@ func (fs *serverInfoFS) Read(path string, offset int64, size int64) ([]byte, err
 	return plugin.ApplyRangeRead(data, offset, size)
 }
 
-func (fs *serverInfoFS) Write(path string, data []byte) ([]byte, error) {
-	return nil, fmt.Errorf("operation not permitted: serverinfofs is read-only")
+func (fs *serverInfoFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
+	return 0, fmt.Errorf("operation not permitted: serverinfofs is read-only")
 }
 
 func (fs *serverInfoFS) Create(path string) error {

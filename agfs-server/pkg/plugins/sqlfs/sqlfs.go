@@ -568,12 +568,17 @@ func (fs *SQLFS) Read(path string, offset int64, size int64) ([]byte, error) {
 	return result, nil
 }
 
-func (fs *SQLFS) Write(path string, data []byte) ([]byte, error) {
+func (fs *SQLFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	path = filesystem.NormalizePath(path)
 
 	// Check file size limit
 	if len(data) > MaxFileSize {
-		return nil, fmt.Errorf("file size exceeds maximum limit of %dMB (got %d bytes)", MaxFileSizeMB, len(data))
+		return 0, fmt.Errorf("file size exceeds maximum limit of %dMB (got %d bytes)", MaxFileSizeMB, len(data))
+	}
+
+	// SQLFS doesn't support offset writes - it's more like an object store
+	if offset >= 0 && offset != 0 {
+		return 0, fmt.Errorf("SQLFS does not support offset writes")
 	}
 
 	fs.mu.Lock()
@@ -584,11 +589,11 @@ func (fs *SQLFS) Write(path string, data []byte) ([]byte, error) {
 	var isDir int
 	err := fs.db.QueryRow("SELECT COUNT(*), COALESCE(MAX(is_dir), 0) FROM files WHERE path = ?", path).Scan(&exists, &isDir)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	if exists > 0 && isDir == 1 {
-		return nil, filesystem.NewInvalidArgumentError("path", path, "is a directory")
+		return 0, filesystem.NewInvalidArgumentError("path", path, "is a directory")
 	}
 
 	if exists == 0 {
@@ -598,12 +603,12 @@ func (fs *SQLFS) Write(path string, data []byte) ([]byte, error) {
 			var parentIsDir int
 			err := fs.db.QueryRow("SELECT is_dir FROM files WHERE path = ?", parent).Scan(&parentIsDir)
 			if err == sql.ErrNoRows {
-				return nil, filesystem.NewNotFoundError("write", parent)
+				return 0, filesystem.NewNotFoundError("write", parent)
 			} else if err != nil {
-				return nil, err
+				return 0, err
 			}
 			if parentIsDir == 0 {
-				return nil, filesystem.NewNotDirectoryError(parent)
+				return 0, filesystem.NewNotDirectoryError(parent)
 			}
 		}
 
@@ -626,10 +631,10 @@ func (fs *SQLFS) Write(path string, data []byte) ([]byte, error) {
 	}
 
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	return []byte(fmt.Sprintf("Written %d bytes to %s", len(data), path)), nil
+	return int64(len(data)), nil
 }
 
 func (fs *SQLFS) ReadDir(path string) ([]filesystem.FileInfo, error) {

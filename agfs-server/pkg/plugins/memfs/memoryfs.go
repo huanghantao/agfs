@@ -29,11 +29,16 @@ type Node struct {
 	Children map[string]*Node
 }
 
-// MemoryFS implements FileSystem interface with in-memory storage
+// MemoryFS implements FileSystem and HandleFS interfaces with in-memory storage
 type MemoryFS struct {
 	root       *Node
 	mu         sync.RWMutex
 	pluginName string
+
+	// Handle management
+	handles      map[int64]*MemoryFileHandle
+	handlesMu    sync.RWMutex
+	nextHandleID int64
 }
 
 // NewMemoryFS creates a new in-memory file system
@@ -51,7 +56,9 @@ func NewMemoryFSWithPlugin(pluginName string) *MemoryFS {
 			ModTime:  time.Now(),
 			Children: make(map[string]*Node),
 		},
-		pluginName: pluginName,
+		pluginName:   pluginName,
+		handles:      make(map[int64]*MemoryFileHandle),
+		nextHandleID: 1,
 	}
 }
 
@@ -222,37 +229,75 @@ func (mfs *MemoryFS) Read(path string, offset int64, size int64) ([]byte, error)
 	return plugin.ApplyRangeRead(node.Data, offset, size)
 }
 
-// Write writes data to a file, creating it if necessary
-func (mfs *MemoryFS) Write(path string, data []byte) ([]byte, error) {
+// Write writes data to a file with optional offset and flags
+func (mfs *MemoryFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	mfs.mu.Lock()
 	defer mfs.mu.Unlock()
 
 	parent, name, err := mfs.getParentNode(path)
 	if err != nil {
-		return nil, err
+		if flags&filesystem.WriteFlagCreate == 0 {
+			return 0, err
+		}
+		// Try to get parent again - maybe it doesn't exist
+		return 0, err
 	}
 
 	node, exists := parent.Children[name]
+
+	// Handle exclusive flag
+	if exists && flags&filesystem.WriteFlagExclusive != 0 {
+		return 0, fmt.Errorf("file already exists: %s", path)
+	}
+
 	if !exists {
+		if flags&filesystem.WriteFlagCreate == 0 {
+			return 0, fmt.Errorf("file not found: %s", path)
+		}
 		// Create the file
 		node = &Node{
 			Name:     name,
 			IsDir:    false,
-			Data:     data,
+			Data:     []byte{},
 			Mode:     0644,
 			ModTime:  time.Now(),
 			Children: nil,
 		}
 		parent.Children[name] = node
-	} else {
-		if node.IsDir {
-			return nil, fmt.Errorf("is a directory: %s", path)
-		}
-		node.Data = data
-		node.ModTime = time.Now()
 	}
 
-	return nil, nil
+	if node.IsDir {
+		return 0, fmt.Errorf("is a directory: %s", path)
+	}
+
+	// Handle truncate flag
+	if flags&filesystem.WriteFlagTruncate != 0 {
+		node.Data = []byte{}
+	}
+
+	// Handle append flag
+	if flags&filesystem.WriteFlagAppend != 0 {
+		offset = int64(len(node.Data))
+	}
+
+	// Handle offset write
+	if offset < 0 {
+		// Overwrite mode (default): replace entire content
+		node.Data = data
+	} else {
+		// Offset write mode
+		newSize := offset + int64(len(data))
+		if newSize > int64(len(node.Data)) {
+			newData := make([]byte, newSize)
+			copy(newData, node.Data)
+			node.Data = newData
+		}
+		copy(node.Data[offset:], data)
+	}
+
+	node.ModTime = time.Now()
+
+	return int64(len(data)), nil
 }
 
 // ReadDir lists the contents of a directory
@@ -396,7 +441,7 @@ func (m *memoryWriteCloser) Write(p []byte) (n int, err error) {
 }
 
 func (m *memoryWriteCloser) Close() error {
-	_, err := m.mfs.Write(m.path, m.buffer.Bytes())
+	_, err := m.mfs.Write(m.path, m.buffer.Bytes(), -1, filesystem.WriteFlagCreate|filesystem.WriteFlagTruncate)
 	return err
 }
 
@@ -408,4 +453,348 @@ func (mfs *MemoryFS) OpenWrite(path string) (io.WriteCloser, error) {
 		path:   path,
 	}, nil
 }
+
+// ============================================================================
+// HandleFS Implementation
+// ============================================================================
+
+// MemoryFileHandle implements FileHandle for in-memory files
+type MemoryFileHandle struct {
+	id     int64
+	path   string
+	flags  filesystem.OpenFlag
+	mfs    *MemoryFS
+	pos    int64
+	closed bool
+	mu     sync.Mutex
+}
+
+// ID returns the unique identifier of this handle
+func (h *MemoryFileHandle) ID() int64 {
+	return h.id
+}
+
+// Path returns the file path this handle is associated with
+func (h *MemoryFileHandle) Path() string {
+	return h.path
+}
+
+// Flags returns the open flags used when opening this handle
+func (h *MemoryFileHandle) Flags() filesystem.OpenFlag {
+	return h.flags
+}
+
+// Read reads up to len(buf) bytes from the current position
+func (h *MemoryFileHandle) Read(buf []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return 0, fmt.Errorf("handle closed")
+	}
+
+	// Check read permission
+	accessMode := h.flags & 0x3
+	if accessMode != filesystem.O_RDONLY && accessMode != filesystem.O_RDWR {
+		return 0, fmt.Errorf("handle not opened for reading")
+	}
+
+	h.mfs.mu.RLock()
+	defer h.mfs.mu.RUnlock()
+
+	node, err := h.mfs.getNode(h.path)
+	if err != nil {
+		return 0, err
+	}
+
+	if h.pos >= int64(len(node.Data)) {
+		return 0, io.EOF
+	}
+
+	n := copy(buf, node.Data[h.pos:])
+	h.pos += int64(n)
+	return n, nil
+}
+
+// ReadAt reads len(buf) bytes from the specified offset (pread)
+func (h *MemoryFileHandle) ReadAt(buf []byte, offset int64) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return 0, fmt.Errorf("handle closed")
+	}
+
+	// Check read permission
+	accessMode := h.flags & 0x3
+	if accessMode != filesystem.O_RDONLY && accessMode != filesystem.O_RDWR {
+		return 0, fmt.Errorf("handle not opened for reading")
+	}
+
+	h.mfs.mu.RLock()
+	defer h.mfs.mu.RUnlock()
+
+	node, err := h.mfs.getNode(h.path)
+	if err != nil {
+		return 0, err
+	}
+
+	if offset >= int64(len(node.Data)) {
+		return 0, io.EOF
+	}
+
+	n := copy(buf, node.Data[offset:])
+	return n, nil
+}
+
+// Write writes data at the current position
+func (h *MemoryFileHandle) Write(data []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return 0, fmt.Errorf("handle closed")
+	}
+
+	// Check write permission
+	accessMode := h.flags & 0x3
+	if accessMode != filesystem.O_WRONLY && accessMode != filesystem.O_RDWR {
+		return 0, fmt.Errorf("handle not opened for writing")
+	}
+
+	h.mfs.mu.Lock()
+	defer h.mfs.mu.Unlock()
+
+	node, err := h.mfs.getNode(h.path)
+	if err != nil {
+		return 0, err
+	}
+
+	// Handle append mode
+	writePos := h.pos
+	if h.flags&filesystem.O_APPEND != 0 {
+		writePos = int64(len(node.Data))
+	}
+
+	// Extend data if necessary
+	newSize := writePos + int64(len(data))
+	if newSize > int64(len(node.Data)) {
+		newData := make([]byte, newSize)
+		copy(newData, node.Data)
+		node.Data = newData
+	}
+
+	copy(node.Data[writePos:], data)
+	h.pos = writePos + int64(len(data))
+	node.ModTime = time.Now()
+
+	return len(data), nil
+}
+
+// WriteAt writes data at the specified offset (pwrite)
+func (h *MemoryFileHandle) WriteAt(data []byte, offset int64) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return 0, fmt.Errorf("handle closed")
+	}
+
+	// Check write permission
+	accessMode := h.flags & 0x3
+	if accessMode != filesystem.O_WRONLY && accessMode != filesystem.O_RDWR {
+		return 0, fmt.Errorf("handle not opened for writing")
+	}
+
+	h.mfs.mu.Lock()
+	defer h.mfs.mu.Unlock()
+
+	node, err := h.mfs.getNode(h.path)
+	if err != nil {
+		return 0, err
+	}
+
+	// Extend data if necessary
+	newSize := offset + int64(len(data))
+	if newSize > int64(len(node.Data)) {
+		newData := make([]byte, newSize)
+		copy(newData, node.Data)
+		node.Data = newData
+	}
+
+	copy(node.Data[offset:], data)
+	node.ModTime = time.Now()
+
+	return len(data), nil
+}
+
+// Seek moves the read/write position
+func (h *MemoryFileHandle) Seek(offset int64, whence int) (int64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return 0, fmt.Errorf("handle closed")
+	}
+
+	h.mfs.mu.RLock()
+	node, err := h.mfs.getNode(h.path)
+	h.mfs.mu.RUnlock()
+	if err != nil {
+		return 0, err
+	}
+
+	var newPos int64
+	switch whence {
+	case io.SeekStart:
+		newPos = offset
+	case io.SeekCurrent:
+		newPos = h.pos + offset
+	case io.SeekEnd:
+		newPos = int64(len(node.Data)) + offset
+	default:
+		return 0, fmt.Errorf("invalid whence: %d", whence)
+	}
+
+	if newPos < 0 {
+		return 0, fmt.Errorf("negative position")
+	}
+
+	h.pos = newPos
+	return h.pos, nil
+}
+
+// Sync synchronizes the file data to storage (no-op for in-memory)
+func (h *MemoryFileHandle) Sync() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return fmt.Errorf("handle closed")
+	}
+	// No-op for in-memory storage
+	return nil
+}
+
+// Close closes the handle and releases resources
+func (h *MemoryFileHandle) Close() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return nil
+	}
+
+	h.closed = true
+
+	// Remove from MemoryFS handles map
+	h.mfs.handlesMu.Lock()
+	delete(h.mfs.handles, h.id)
+	h.mfs.handlesMu.Unlock()
+
+	return nil
+}
+
+// Stat returns file information
+func (h *MemoryFileHandle) Stat() (*filesystem.FileInfo, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return nil, fmt.Errorf("handle closed")
+	}
+
+	return h.mfs.Stat(h.path)
+}
+
+// OpenHandle opens a file and returns a handle for stateful operations
+func (mfs *MemoryFS) OpenHandle(path string, flags filesystem.OpenFlag, mode uint32) (filesystem.FileHandle, error) {
+	mfs.mu.Lock()
+	defer mfs.mu.Unlock()
+
+	path = filesystem.NormalizePath(path)
+
+	// Check if file exists
+	node, err := mfs.getNode(path)
+	fileExists := err == nil && node != nil
+
+	// Handle O_EXCL: fail if file exists
+	if flags&filesystem.O_EXCL != 0 && fileExists {
+		return nil, fmt.Errorf("file already exists: %s", path)
+	}
+
+	// Handle O_CREATE: create file if it doesn't exist
+	if flags&filesystem.O_CREATE != 0 && !fileExists {
+		parent, name, err := mfs.getParentNode(path)
+		if err != nil {
+			return nil, fmt.Errorf("parent directory not found: %s", path)
+		}
+		node = &Node{
+			Name:     name,
+			IsDir:    false,
+			Data:     []byte{},
+			Mode:     mode,
+			ModTime:  time.Now(),
+			Children: nil,
+		}
+		parent.Children[name] = node
+	} else if !fileExists {
+		return nil, fmt.Errorf("file not found: %s", path)
+	}
+
+	if node.IsDir {
+		return nil, fmt.Errorf("is a directory: %s", path)
+	}
+
+	// Handle O_TRUNC: truncate file
+	if flags&filesystem.O_TRUNC != 0 {
+		node.Data = []byte{}
+		node.ModTime = time.Now()
+	}
+
+	// Create handle with auto-incremented ID
+	mfs.handlesMu.Lock()
+	handleID := mfs.nextHandleID
+	mfs.nextHandleID++
+	handle := &MemoryFileHandle{
+		id:    handleID,
+		path:  path,
+		flags: flags,
+		mfs:   mfs,
+		pos:   0,
+	}
+	mfs.handles[handleID] = handle
+	mfs.handlesMu.Unlock()
+
+	return handle, nil
+}
+
+// GetHandle retrieves an existing handle by its ID
+func (mfs *MemoryFS) GetHandle(id int64) (filesystem.FileHandle, error) {
+	mfs.handlesMu.RLock()
+	defer mfs.handlesMu.RUnlock()
+
+	handle, exists := mfs.handles[id]
+	if !exists {
+		return nil, filesystem.ErrNotFound
+	}
+
+	return handle, nil
+}
+
+// CloseHandle closes a handle by its ID
+func (mfs *MemoryFS) CloseHandle(id int64) error {
+	mfs.handlesMu.RLock()
+	handle, exists := mfs.handles[id]
+	mfs.handlesMu.RUnlock()
+
+	if !exists {
+		return filesystem.ErrNotFound
+	}
+
+	return handle.Close()
+}
+
+// Ensure MemoryFS implements HandleFS interface
+var _ filesystem.HandleFS = (*MemoryFS)(nil)
 

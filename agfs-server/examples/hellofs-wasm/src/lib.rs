@@ -2,12 +2,36 @@
 //!
 //! Returns a single file with "Hello World" content
 //! Also demonstrates accessing the host filesystem
+//! Now with HandleFS support for FUSE-like stateful operations
 
 use agfs_wasm_ffi::prelude::*;
+use std::collections::HashMap;
+
+/// Internal file handle state
+struct HandleState {
+    path: String,
+    flags: OpenFlag,
+    pos: i64,
+    /// File content (for /hello.txt) or None for host files
+    content: Option<Vec<u8>>,
+    /// For host files, store the host path
+    host_path: Option<String>,
+}
+
+/// Counter for generating unique handle IDs
+static mut HANDLE_COUNTER: u64 = 0;
+
+fn generate_handle_id() -> String {
+    unsafe {
+        HANDLE_COUNTER += 1;
+        format!("wh_{:016x}", HANDLE_COUNTER)
+    }
+}
 
 #[derive(Default)]
 pub struct HelloFS {
     host_prefix: String,
+    handles: HashMap<String, HandleState>,
 }
 
 impl FileSystem for HelloFS {
@@ -120,13 +144,15 @@ impl FileSystem for HelloFS {
         }
     }
 
-    fn write(&mut self, path: &str, data: &[u8]) -> Result<Vec<u8>> {
+    fn write(&mut self, path: &str, data: &[u8], _offset: i64, _flags: WriteFlag) -> Result<i64> {
         if path.starts_with("/host/") && !self.host_prefix.is_empty() {
             // Proxy to host filesystem
+            // Note: HostFS doesn't support offset/flags yet, ignoring them
             let host_path = path.strip_prefix("/host").unwrap();
             let full_path = format!("{}{}", self.host_prefix, host_path);
             HostFS::write(&full_path, data)
-                .map_err(|e| Error::Other(format!("host fs: {}", e)))
+                .map_err(|e| Error::Other(format!("host fs: {}", e)))?;
+            Ok(data.len() as i64)
         } else {
             Err(Error::PermissionDenied)
         }
@@ -199,4 +225,222 @@ impl FileSystem for HelloFS {
     }
 }
 
-export_plugin!(HelloFS);
+impl HandleFS for HelloFS {
+    fn open_handle(&mut self, path: &str, flags: OpenFlag, _mode: u32) -> Result<String> {
+        // Check if file exists (unless O_CREATE is set)
+        let exists = self.stat(path).is_ok();
+
+        if !exists && !flags.contains(OpenFlag::O_CREATE) {
+            return Err(Error::NotFound);
+        }
+
+        // Handle O_EXCL - should fail if file exists
+        if exists && flags.contains(OpenFlag::O_EXCL) && flags.contains(OpenFlag::O_CREATE) {
+            return Err(Error::AlreadyExists);
+        }
+
+        // Determine content and host_path
+        let (content, host_path) = match path {
+            "/hello.txt" => {
+                // Built-in file - load content
+                (Some(b"Hello World\n".to_vec()), None)
+            }
+            p if p.starts_with("/host/") && !self.host_prefix.is_empty() => {
+                // Host file
+                let hp = p.strip_prefix("/host").unwrap();
+                let full_path = format!("{}{}", self.host_prefix, hp);
+                (None, Some(full_path))
+            }
+            _ => return Err(Error::NotFound),
+        };
+
+        let id = generate_handle_id();
+        let state = HandleState {
+            path: path.to_string(),
+            flags,
+            pos: 0,
+            content,
+            host_path,
+        };
+
+        self.handles.insert(id.clone(), state);
+        Ok(id)
+    }
+
+    fn handle_read(&mut self, id: &str, buf: &mut [u8]) -> Result<usize> {
+        let state = self.handles.get_mut(id).ok_or(Error::NotFound)?;
+
+        if !state.flags.is_readable() {
+            return Err(Error::PermissionDenied);
+        }
+
+        let pos = state.pos;
+        let n = self.handle_read_at_internal(id, buf, pos)?;
+
+        // Update position
+        if let Some(state) = self.handles.get_mut(id) {
+            state.pos += n as i64;
+        }
+
+        Ok(n)
+    }
+
+    fn handle_read_at(&self, id: &str, buf: &mut [u8], offset: i64) -> Result<usize> {
+        let state = self.handles.get(id).ok_or(Error::NotFound)?;
+
+        if !state.flags.is_readable() {
+            return Err(Error::PermissionDenied);
+        }
+
+        // For local content (hello.txt)
+        if let Some(ref content) = state.content {
+            if offset < 0 || offset as usize >= content.len() {
+                return Ok(0);
+            }
+            let start = offset as usize;
+            let end = (start + buf.len()).min(content.len());
+            let n = end - start;
+            buf[..n].copy_from_slice(&content[start..end]);
+            return Ok(n);
+        }
+
+        // For host files
+        if let Some(ref host_path) = state.host_path {
+            let data = HostFS::read(host_path, offset, buf.len() as i64)
+                .map_err(|e| Error::Other(format!("host fs: {}", e)))?;
+            let n = data.len().min(buf.len());
+            buf[..n].copy_from_slice(&data[..n]);
+            return Ok(n);
+        }
+
+        Ok(0)
+    }
+
+    fn handle_write(&mut self, id: &str, data: &[u8]) -> Result<usize> {
+        let state = self.handles.get_mut(id).ok_or(Error::NotFound)?;
+
+        if !state.flags.is_writable() {
+            return Err(Error::PermissionDenied);
+        }
+
+        // Handle append mode
+        let pos = if state.flags.contains(OpenFlag::O_APPEND) {
+            if let Some(ref content) = state.content {
+                content.len() as i64
+            } else if let Some(ref host_path) = state.host_path {
+                let info = HostFS::stat(host_path)
+                    .map_err(|e| Error::Other(format!("host fs: {}", e)))?;
+                info.size
+            } else {
+                state.pos
+            }
+        } else {
+            state.pos
+        };
+
+        let n = self.handle_write_at_internal(id, data, pos)?;
+
+        // Update position
+        if let Some(state) = self.handles.get_mut(id) {
+            state.pos = pos + n as i64;
+        }
+
+        Ok(n)
+    }
+
+    fn handle_write_at(&self, id: &str, data: &[u8], _offset: i64) -> Result<usize> {
+        let state = self.handles.get(id).ok_or(Error::NotFound)?;
+
+        if !state.flags.is_writable() {
+            return Err(Error::PermissionDenied);
+        }
+
+        // /hello.txt is read-only
+        if state.content.is_some() {
+            return Err(Error::PermissionDenied);
+        }
+
+        // For host files
+        if let Some(ref host_path) = state.host_path {
+            // Note: Host FS write doesn't support offset well
+            HostFS::write(host_path, data)
+                .map_err(|e| Error::Other(format!("host fs: {}", e)))?;
+            return Ok(data.len());
+        }
+
+        Err(Error::PermissionDenied)
+    }
+
+    fn handle_seek(&mut self, id: &str, offset: i64, whence: i32) -> Result<i64> {
+        let state = self.handles.get_mut(id).ok_or(Error::NotFound)?;
+
+        let size = if let Some(ref content) = state.content {
+            content.len() as i64
+        } else if let Some(ref host_path) = state.host_path {
+            let info = HostFS::stat(host_path)
+                .map_err(|e| Error::Other(format!("host fs: {}", e)))?;
+            info.size
+        } else {
+            0
+        };
+
+        let new_pos = match whence {
+            0 => offset,                    // SEEK_SET
+            1 => state.pos + offset,        // SEEK_CUR
+            2 => size + offset,             // SEEK_END
+            _ => return Err(Error::InvalidInput("invalid whence".to_string())),
+        };
+
+        if new_pos < 0 {
+            return Err(Error::InvalidInput("negative position".to_string()));
+        }
+
+        state.pos = new_pos;
+        Ok(state.pos)
+    }
+
+    fn handle_sync(&self, id: &str) -> Result<()> {
+        let _ = self.handles.get(id).ok_or(Error::NotFound)?;
+        Ok(())
+    }
+
+    fn handle_stat(&self, id: &str) -> Result<FileInfo> {
+        let state = self.handles.get(id).ok_or(Error::NotFound)?;
+
+        if let Some(ref content) = state.content {
+            return Ok(FileInfo::file("hello.txt", content.len() as i64, 0o644));
+        }
+
+        if let Some(ref host_path) = state.host_path {
+            let info = HostFS::stat(host_path)
+                .map_err(|e| Error::Other(format!("host fs: {}", e)))?;
+            return Ok(info);
+        }
+
+        Err(Error::NotFound)
+    }
+
+    fn handle_info(&self, id: &str) -> Result<(String, OpenFlag)> {
+        let state = self.handles.get(id).ok_or(Error::NotFound)?;
+        Ok((state.path.clone(), state.flags))
+    }
+
+    fn close_handle(&mut self, id: &str) -> Result<()> {
+        self.handles.remove(id).ok_or(Error::NotFound)?;
+        Ok(())
+    }
+}
+
+// Helper methods for internal use
+impl HelloFS {
+    fn handle_read_at_internal(&self, id: &str, buf: &mut [u8], offset: i64) -> Result<usize> {
+        self.handle_read_at(id, buf, offset)
+    }
+
+    fn handle_write_at_internal(&self, id: &str, data: &[u8], offset: i64) -> Result<usize> {
+        self.handle_write_at(id, data, offset)
+    }
+}
+
+// Export with HandleFS support
+export_handle_plugin!(HelloFS);

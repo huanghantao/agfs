@@ -415,7 +415,7 @@ func (sfs *StreamFS) Read(path string, offset int64, size int64) ([]byte, error)
 	return nil, fmt.Errorf("use stream mode for reading stream files")
 }
 
-func (sfs *StreamFS) Write(path string, data []byte) ([]byte, error) {
+func (sfs *StreamFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
 	sfs.mu.Lock()
 	stream, exists := sfs.streams[path]
 	if !exists {
@@ -425,12 +425,13 @@ func (sfs *StreamFS) Write(path string, data []byte) ([]byte, error) {
 	}
 	sfs.mu.Unlock()
 
+	// StreamFS is append-only (broadcast), offset is ignored
 	err := stream.Write(data)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	return []byte(fmt.Sprintf("Written %d bytes to stream", len(data))), nil
+	return int64(len(data)), nil
 }
 
 func (sfs *StreamFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
@@ -569,7 +570,7 @@ type streamWriter struct {
 }
 
 func (sw *streamWriter) Write(p []byte) (n int, err error) {
-	_, err = sw.sfs.Write(sw.path, p)
+	_, err = sw.sfs.Write(sw.path, p, -1, filesystem.WriteFlagAppend)
 	if err != nil {
 		return 0, err
 	}

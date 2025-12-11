@@ -88,11 +88,18 @@ public:
         return agfs::Error::not_found();
     }
 
-    agfs::Result<std::vector<uint8_t>> write(const std::string& path,
-                                            const std::vector<uint8_t>& data) override {
+    agfs::Result<int64_t> write(const std::string& path,
+                                const std::vector<uint8_t>& data,
+                                int64_t offset,
+                                agfs::WriteFlag flags) override {
+        (void)offset; (void)flags; // HostFS doesn't support offset/flags yet
         auto host_path = get_host_path(path);
         if (!host_path.empty()) {
-            return agfs::HostFS::write(host_path, data);
+            auto result = agfs::HostFS::write(host_path, data);
+            if (result.is_ok()) {
+                return static_cast<int64_t>(data.size());
+            }
+            return result.unwrap_err();
         }
         return agfs::Error::permission_denied();
     }

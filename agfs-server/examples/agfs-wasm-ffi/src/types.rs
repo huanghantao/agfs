@@ -209,3 +209,111 @@ impl From<serde_json::Value> for Config {
         }
     }
 }
+
+/// Write flags for file operations (matches Go filesystem.WriteFlag)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteFlag(pub u32);
+
+impl WriteFlag {
+    /// No special flags (default overwrite)
+    pub const NONE: WriteFlag = WriteFlag(0);
+    /// Append mode - write at end of file
+    pub const APPEND: WriteFlag = WriteFlag(1 << 0);
+    /// Create file if it doesn't exist
+    pub const CREATE: WriteFlag = WriteFlag(1 << 1);
+    /// Fail if file already exists (used with CREATE)
+    pub const EXCLUSIVE: WriteFlag = WriteFlag(1 << 2);
+    /// Truncate file before writing
+    pub const TRUNCATE: WriteFlag = WriteFlag(1 << 3);
+    /// Sync after write
+    pub const SYNC: WriteFlag = WriteFlag(1 << 4);
+
+    /// Check if a flag is set
+    pub fn contains(&self, flag: WriteFlag) -> bool {
+        (self.0 & flag.0) != 0
+    }
+
+    /// Combine flags
+    pub fn with(&self, flag: WriteFlag) -> WriteFlag {
+        WriteFlag(self.0 | flag.0)
+    }
+}
+
+impl From<u32> for WriteFlag {
+    fn from(value: u32) -> Self {
+        WriteFlag(value)
+    }
+}
+
+impl From<WriteFlag> for u32 {
+    fn from(value: WriteFlag) -> Self {
+        value.0
+    }
+}
+
+/// Open flags for file handle operations (matches Go filesystem.OpenFlag)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenFlag(pub u32);
+
+impl OpenFlag {
+    /// Open for reading only
+    pub const O_RDONLY: OpenFlag = OpenFlag(0);
+    /// Open for writing only
+    pub const O_WRONLY: OpenFlag = OpenFlag(1);
+    /// Open for reading and writing
+    pub const O_RDWR: OpenFlag = OpenFlag(2);
+    /// Append mode - writes append to end of file
+    pub const O_APPEND: OpenFlag = OpenFlag(1 << 3);
+    /// Create file if it doesn't exist
+    pub const O_CREATE: OpenFlag = OpenFlag(1 << 4);
+    /// Exclusive - fail if file exists (used with O_CREATE)
+    pub const O_EXCL: OpenFlag = OpenFlag(1 << 5);
+    /// Truncate file to zero length
+    pub const O_TRUNC: OpenFlag = OpenFlag(1 << 6);
+
+    /// Check if a flag is set
+    pub fn contains(&self, flag: OpenFlag) -> bool {
+        (self.0 & flag.0) != 0
+    }
+
+    /// Combine flags
+    pub fn with(&self, flag: OpenFlag) -> OpenFlag {
+        OpenFlag(self.0 | flag.0)
+    }
+
+    /// Get the access mode (O_RDONLY, O_WRONLY, or O_RDWR)
+    pub fn access_mode(&self) -> OpenFlag {
+        OpenFlag(self.0 & 3)
+    }
+
+    /// Check if readable
+    pub fn is_readable(&self) -> bool {
+        let mode = self.access_mode().0;
+        mode == 0 || mode == 2  // O_RDONLY or O_RDWR
+    }
+
+    /// Check if writable
+    pub fn is_writable(&self) -> bool {
+        let mode = self.access_mode().0;
+        mode == 1 || mode == 2  // O_WRONLY or O_RDWR
+    }
+}
+
+impl From<u32> for OpenFlag {
+    fn from(value: u32) -> Self {
+        OpenFlag(value)
+    }
+}
+
+impl From<OpenFlag> for u32 {
+    fn from(value: OpenFlag) -> Self {
+        value.0
+    }
+}
+
+impl std::ops::BitOr for OpenFlag {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        OpenFlag(self.0 | rhs.0)
+    }
+}

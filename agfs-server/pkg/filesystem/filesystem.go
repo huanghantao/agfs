@@ -5,6 +5,42 @@ import (
 	"time"
 )
 
+// WriteFlag defines write behavior flags (similar to POSIX open flags)
+type WriteFlag uint32
+
+const (
+	// WriteFlagNone is the default behavior: overwrite the file
+	WriteFlagNone WriteFlag = 0
+
+	// WriteFlagAppend appends data to the end of the file (ignores offset)
+	WriteFlagAppend WriteFlag = 1 << 0
+
+	// WriteFlagCreate creates the file if it doesn't exist
+	WriteFlagCreate WriteFlag = 1 << 1
+
+	// WriteFlagExclusive fails if the file already exists (used with WriteFlagCreate)
+	WriteFlagExclusive WriteFlag = 1 << 2
+
+	// WriteFlagTruncate truncates the file before writing
+	WriteFlagTruncate WriteFlag = 1 << 3
+
+	// WriteFlagSync syncs the file after writing (fsync)
+	WriteFlagSync WriteFlag = 1 << 4
+)
+
+// OpenFlag defines file open flags (similar to os.O_* flags)
+type OpenFlag int
+
+const (
+	O_RDONLY OpenFlag = 0
+	O_WRONLY OpenFlag = 1
+	O_RDWR   OpenFlag = 2
+	O_APPEND OpenFlag = 1 << 3
+	O_CREATE OpenFlag = 1 << 4
+	O_EXCL   OpenFlag = 1 << 5
+	O_TRUNC  OpenFlag = 1 << 6
+)
+
 // MetaData represents structured metadata for files and directories
 type MetaData struct {
 	Name    string            // Plugin name or identifier
@@ -42,9 +78,11 @@ type FileSystem interface {
 	// Returns io.EOF if offset+size >= file size (reached end of file)
 	Read(path string, offset int64, size int64) ([]byte, error)
 
-	// Write writes data to a file, creating it if necessary
-	// Returns a response message (e.g., "" or any custom message) and error
-	Write(path string, data []byte) ([]byte, error)
+	// Write writes data to a file with optional offset and flags
+	// offset: write position (-1 means overwrite or append depending on flags)
+	// flags: WriteFlag bits controlling behavior (create, truncate, append, sync)
+	// Returns: number of bytes written and error
+	Write(path string, data []byte, offset int64, flags WriteFlag) (int64, error)
 
 	// ReadDir lists the contents of a directory
 	ReadDir(path string) ([]FileInfo, error)

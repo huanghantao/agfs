@@ -119,20 +119,23 @@ T* PluginInstance<T>::instance = nullptr;
         return agfs::ffi::pack_u64((uint32_t)json_ptr, 0); \
     } \
     \
+    /* fs_write with offset and flags */ \
+    /* Returns packed u64: high 32 bits = bytes written, low 32 bits = error ptr (0 = success) */ \
     __attribute__((export_name("fs_write"))) \
-    uint64_t fs_write(const char* path_ptr, const uint8_t* data_ptr, size_t size) { \
-        if (!g_plugin_instance) return 0; \
+    uint64_t fs_write(const char* path_ptr, const uint8_t* data_ptr, size_t size, int64_t offset, uint32_t flags) { \
+        if (!g_plugin_instance) { \
+            char* err_ptr = agfs::ffi::copy_string("not initialized"); \
+            return agfs::ffi::pack_u64(0, (uint32_t)err_ptr); \
+        } \
         std::string path = agfs::ffi::read_string(path_ptr); \
         std::vector<uint8_t> data(data_ptr, data_ptr + size); \
-        auto result = g_plugin_instance->write(path, data); \
+        auto result = g_plugin_instance->write(path, data, offset, agfs::WriteFlag(flags)); \
         if (result.is_err()) { \
-            return 0; \
+            char* err_ptr = agfs::ffi::copy_string(result.unwrap_err().to_string()); \
+            return agfs::ffi::pack_u64(0, (uint32_t)err_ptr); \
         } \
-        auto& response = result.unwrap(); \
-        uint32_t len = response.size(); \
-        uint8_t* buf = (uint8_t*)agfs::ffi::wasm_malloc(len); \
-        std::memcpy(buf, response.data(), len); \
-        return agfs::ffi::pack_u64((uint32_t)buf, len); \
+        /* Pack bytes_written in high 32 bits, 0 (success) in low 32 bits */ \
+        return agfs::ffi::pack_u64((uint32_t)result.unwrap(), 0); \
     } \
     \
     __attribute__((export_name("fs_create"))) \

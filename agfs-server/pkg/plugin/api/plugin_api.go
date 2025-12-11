@@ -27,16 +27,16 @@ type PluginVTable struct {
 	PluginGetReadme  func(unsafe.Pointer) *byte
 
 	// FileSystem operation functions
-	FSCreate     func(unsafe.Pointer, *byte) *byte
-	FSMkdir      func(unsafe.Pointer, *byte, uint32) *byte
-	FSRemove     func(unsafe.Pointer, *byte) *byte
-	FSRemoveAll  func(unsafe.Pointer, *byte) *byte
-	FSRead       func(unsafe.Pointer, *byte, int64, int64, *int) *byte // Returns data, sets size
-	FSWrite      func(unsafe.Pointer, *byte, *byte, int) *byte         // Returns response
-	FSReadDir    func(unsafe.Pointer, *byte, *int) *FileInfoArray      // Returns array, sets count
-	FSStat       func(unsafe.Pointer, *byte) *FileInfoC
-	FSRename     func(unsafe.Pointer, *byte, *byte) *byte
-	FSChmod      func(unsafe.Pointer, *byte, uint32) *byte
+	FSCreate    func(unsafe.Pointer, *byte) *byte
+	FSMkdir     func(unsafe.Pointer, *byte, uint32) *byte
+	FSRemove    func(unsafe.Pointer, *byte) *byte
+	FSRemoveAll func(unsafe.Pointer, *byte) *byte
+	FSRead      func(unsafe.Pointer, *byte, int64, int64, *int) *byte              // Returns data, sets size
+	FSWrite     func(unsafe.Pointer, *byte, *byte, int, int64, uint32) int64       // NEW: (plugin, path, data, len, offset, flags) -> bytes_written (-1 = error)
+	FSReadDir   func(unsafe.Pointer, *byte, *int) *FileInfoArray                   // Returns array, sets count
+	FSStat      func(unsafe.Pointer, *byte) *FileInfoC
+	FSRename    func(unsafe.Pointer, *byte, *byte) *byte
+	FSChmod     func(unsafe.Pointer, *byte, uint32) *byte
 }
 
 // FileInfoC is the C-compatible representation of filesystem.FileInfo

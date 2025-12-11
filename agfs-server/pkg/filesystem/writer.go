@@ -2,9 +2,9 @@ package filesystem
 
 import "io"
 
-// WriteFunc is a function that writes data to a path and returns the result and any error.
+// WriteFunc is a function that writes data to a path and returns the bytes written and any error.
 // This is typically a FileSystem's Write method.
-type WriteFunc func(path string, data []byte) ([]byte, error)
+type WriteFunc func(path string, data []byte, offset int64, flags WriteFlag) (int64, error)
 
 // BufferedWriter is a generic io.WriteCloser that buffers writes in memory
 // and flushes them when Close() is called.
@@ -34,7 +34,7 @@ func (w *BufferedWriter) Write(p []byte) (n int, err error) {
 
 // Close flushes the buffered data by calling the write function and returns any error.
 func (w *BufferedWriter) Close() error {
-	_, err := w.writeFunc(w.path, w.buf)
+	_, err := w.writeFunc(w.path, w.buf, -1, WriteFlagCreate|WriteFlagTruncate)
 	return err
 }
 
