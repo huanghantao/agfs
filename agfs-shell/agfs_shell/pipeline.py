@@ -6,6 +6,7 @@ import io
 from typing import List, Union
 from .process import Process
 from .streams import InputStream, OutputStream, ErrorStream
+from .control_flow import ControlFlowException
 
 
 class StreamingPipeline:
@@ -87,6 +88,9 @@ class StreamingPipeline:
         try:
             exit_code = process.execute()
             self.exit_codes[index] = exit_code
+        except ControlFlowException:
+            # Let control flow exceptions propagate
+            raise
         except Exception as e:
             process.stderr.write(f"Pipeline error: {e}\n")
             self.exit_codes[index] = 1

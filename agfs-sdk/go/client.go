@@ -607,3 +607,234 @@ func (c *Client) Digest(path, algorithm string) (*DigestResponse, error) {
 
 	return &digestResp, nil
 }
+
+// OpenHandle opens a file and returns a handle ID
+func (c *Client) OpenHandle(path string, flags OpenFlag, mode uint32) (int64, error) {
+	query := url.Values{}
+	query.Set("path", path)
+	query.Set("flags", fmt.Sprintf("%d", flags))
+	query.Set("mode", fmt.Sprintf("%d", mode))
+
+	resp, err := c.doRequest(http.MethodPost, "/handles/open", query, nil)
+	if err != nil {
+		return 0, fmt.Errorf("open handle request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return 0, fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	var handleResp HandleResponse
+	if err := json.NewDecoder(resp.Body).Decode(&handleResp); err != nil {
+		return 0, fmt.Errorf("failed to decode handle response: %w", err)
+	}
+
+	return handleResp.HandleID, nil
+}
+
+// CloseHandle closes a file handle
+func (c *Client) CloseHandle(handleID int64) error {
+	endpoint := fmt.Sprintf("/handles/%d", handleID)
+
+	resp, err := c.doRequest(http.MethodDelete, endpoint, nil, nil)
+	if err != nil {
+		return fmt.Errorf("close handle request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	return nil
+}
+
+// ReadHandle reads data from a file handle
+func (c *Client) ReadHandle(handleID int64, offset int64, size int) ([]byte, error) {
+	endpoint := fmt.Sprintf("/handles/%d/read", handleID)
+	query := url.Values{}
+	query.Set("offset", fmt.Sprintf("%d", offset))
+	query.Set("size", fmt.Sprintf("%d", size))
+
+	resp, err := c.doRequest(http.MethodGet, endpoint, query, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read handle request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return nil, fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	return data, nil
+}
+
+// WriteHandle writes data to a file handle
+func (c *Client) WriteHandle(handleID int64, data []byte, offset int64) (int, error) {
+	endpoint := fmt.Sprintf("/handles/%d/write", handleID)
+	query := url.Values{}
+	query.Set("offset", fmt.Sprintf("%d", offset))
+
+	// Note: For binary data, we don't use JSON
+	req, err := http.NewRequest(http.MethodPut, c.baseURL+endpoint+"?"+query.Encode(), bytes.NewReader(data))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("write handle request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return 0, fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	// Parse bytes written from response
+	var result struct {
+		BytesWritten int `json:"bytesWritten"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		// If parsing fails, assume all bytes were written
+		return len(data), nil
+	}
+
+	return result.BytesWritten, nil
+}
+
+// SyncHandle syncs a file handle
+func (c *Client) SyncHandle(handleID int64) error {
+	endpoint := fmt.Sprintf("/handles/%d/sync", handleID)
+
+	resp, err := c.doRequest(http.MethodPost, endpoint, nil, nil)
+	if err != nil {
+		return fmt.Errorf("sync handle request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	return nil
+}
+
+// SeekHandle seeks to a position in a file handle
+func (c *Client) SeekHandle(handleID int64, offset int64, whence int) (int64, error) {
+	endpoint := fmt.Sprintf("/handles/%d/seek", handleID)
+	query := url.Values{}
+	query.Set("offset", fmt.Sprintf("%d", offset))
+	query.Set("whence", fmt.Sprintf("%d", whence))
+
+	resp, err := c.doRequest(http.MethodPost, endpoint, query, nil)
+	if err != nil {
+		return 0, fmt.Errorf("seek handle request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return 0, fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	var result struct {
+		Offset int64 `json:"offset"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result.Offset, nil
+}
+
+// GetHandle retrieves information about an open handle
+func (c *Client) GetHandle(handleID int64) (*HandleInfo, error) {
+	endpoint := fmt.Sprintf("/handles/%d", handleID)
+
+	resp, err := c.doRequest(http.MethodGet, endpoint, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get handle request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return nil, fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	var handleInfo HandleInfo
+	if err := json.NewDecoder(resp.Body).Decode(&handleInfo); err != nil {
+		return nil, fmt.Errorf("failed to decode handle info: %w", err)
+	}
+
+	return &handleInfo, nil
+}
+
+// StatHandle gets file info via a handle
+func (c *Client) StatHandle(handleID int64) (*FileInfo, error) {
+	endpoint := fmt.Sprintf("/handles/%d/stat", handleID)
+
+	resp, err := c.doRequest(http.MethodGet, endpoint, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("stat handle request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return nil, fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	var fileInfo FileInfoResponse
+	if err := json.NewDecoder(resp.Body).Decode(&fileInfo); err != nil {
+		return nil, fmt.Errorf("failed to decode file info response: %w", err)
+	}
+
+	modTime, _ := time.Parse(time.RFC3339Nano, fileInfo.ModTime)
+
+	return &FileInfo{
+		Name:    fileInfo.Name,
+		Size:    fileInfo.Size,
+		Mode:    fileInfo.Mode,
+		ModTime: modTime,
+		IsDir:   fileInfo.IsDir,
+		Meta:    fileInfo.Meta,
+	}, nil
+}

@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from .filesystem import AGFSFileSystem
 
 from .streams import InputStream, OutputStream, ErrorStream
+from .control_flow import ControlFlowException
 
 
 class Process:
@@ -60,6 +61,9 @@ class Process:
         try:
             # Execute the command
             self.exit_code = self.executor(self)
+        except ControlFlowException:
+            # Let control flow exceptions (break, continue, return) propagate
+            raise
         except Exception as e:
             self.stderr.write(f"Error executing '{self.command}': {str(e)}\n")
             self.exit_code = 1

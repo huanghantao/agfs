@@ -23,6 +23,10 @@ from .exit_codes import (
     EXIT_CODE_FUNCTION_DEF_NEEDED,
     EXIT_CODE_RETURN
 )
+from .control_flow import BreakException, ContinueException, ReturnException
+from .control_parser import ControlParser
+from .executor import ShellExecutor
+from .expression import ExpressionExpander
 
 
 class Shell:
@@ -53,6 +57,13 @@ class Shell:
         # Each entry is a dict of local variables for that scope
         self.local_scopes = []
 
+        # Control flow components
+        self.control_parser = ControlParser(self)
+        self.executor = ShellExecutor(self)
+
+        # Expression expander (unified variable/arithmetic/command substitution)
+        self.expression_expander = ExpressionExpander(self)
+
     def _execute_command_substitution(self, command: str) -> str:
         """
         Execute a command and return its output as a string
@@ -77,20 +88,41 @@ class Shell:
                 cmd, args = commands[0]
                 if cmd in self.functions:
                     # Execute the function and capture all its output
-                    # We'll redirect stdout to capture all output from the function
-                    import sys
+                    # We need to capture at the stream level, not sys.stdout
                     import io
 
-                    # Save real stdout
+                    # Create a buffer to capture output
+                    output_buffer = io.BytesIO()
+
+                    # Save real stdout buffer
+                    import sys
+                    old_stdout_buffer = sys.stdout.buffer if hasattr(sys.stdout, 'buffer') else None
+
+                    # Create a wrapper that has .buffer attribute
+                    class StdoutWrapper:
+                        def __init__(self, buffer):
+                            self._buffer = buffer
+                        @property
+                        def buffer(self):
+                            return self._buffer
+                        def write(self, s):
+                            if isinstance(s, str):
+                                self._buffer.write(s.encode('utf-8'))
+                            else:
+                                self._buffer.write(s)
+                        def flush(self):
+                            pass
+
+                    # Temporarily replace sys.stdout
                     old_stdout = sys.stdout
-                    sys.stdout = io.StringIO()
+                    sys.stdout = StdoutWrapper(output_buffer)
 
                     try:
-                        # Execute the function normally
+                        # Execute the function
                         exit_code = self.execute_function(cmd, args)
 
                         # Get all captured output
-                        output = sys.stdout.getvalue()
+                        output = output_buffer.getvalue().decode('utf-8')
                         # Remove trailing newline if present
                         if output.endswith('\n'):
                             output = output[:-1]
@@ -179,11 +211,11 @@ class Shell:
     def _strip_comment(self, line: str) -> str:
         """
         Remove comments from a command line
-        - Lines starting with # or // are treated as full comments
-        - Inline comments (# or // after command) are removed
+        - Lines starting with # are treated as full comments
+        - Inline comments (# after command) are removed
         - Comment markers inside quotes are preserved
 
-        Now uses the robust lexer module for consistent parsing.
+        Uses the robust lexer module for consistent parsing.
 
         Args:
             line: Command line string
@@ -191,27 +223,13 @@ class Shell:
         Returns:
             Line with comments removed
         """
-        from .lexer import strip_comments, QuoteTracker
+        from .lexer import strip_comments
 
         # Empty line check
-        stripped = line.lstrip()
-        if not stripped:
+        if not line.lstrip():
             return ''
 
-        # Check for // comments (full line)
-        if stripped.startswith('//'):
-            return ''
-
-        # Strip inline // comments (respecting quotes)
-        if '//' in line:
-            tracker = QuoteTracker()
-            for i in range(len(line) - 1):
-                tracker.process_char(line[i])
-                if line[i:i+2] == '//' and not tracker.is_quoted():
-                    line = line[:i]
-                    break
-
-        # Strip # comments using lexer (also respects quotes)
+        # Strip # comments using lexer (respects quotes)
         return strip_comments(line, comment_chars='#')
 
     def _get_variable(self, var_name: str) -> str:
@@ -357,8 +375,8 @@ class Shell:
                     return node.value
                 else:
                     raise ValueError(f"Only numeric constants allowed, got {type(node.value)}")
-            elif isinstance(node, ast.Num):
-                # Python 3.7 and earlier use ast.Num
+            elif hasattr(ast, 'Num') and isinstance(node, ast.Num):
+                # Python 3.7 and earlier use ast.Num (removed in Python 3.12)
                 return node.n
             elif isinstance(node, ast.BinOp):
                 # Binary operation (e.g., 5 + 3)
@@ -399,16 +417,23 @@ class Shell:
         """
         Expand ALL variable types and command substitutions
 
-        Supports:
+        Uses the new ExpressionExpander for unified handling of:
         - Special variables: $?, $#, $@, $0
         - Simple variables: $VAR
-        - Braced variables: ${VAR}
+        - Braced variables: ${VAR}, ${VAR:-default}, ${VAR#pattern}, etc.
         - Positional parameters: $1, $2, ...
         - Arithmetic expressions: $((expr))
         - Command substitution: $(command), `command`
 
         Returns:
             Text with all expansions applied
+        """
+        return self.expression_expander.expand(text)
+
+    def _expand_variables_legacy(self, text: str) -> str:
+        """
+        Legacy implementation of variable expansion.
+        Kept for reference and fallback if needed.
         """
         import re
 
@@ -525,8 +550,18 @@ class Shell:
                 # We need to expand both $VAR and VAR
                 expanded_expr = expr
 
-                # First, expand $VAR (with dollar sign)
-                for var_match in re.finditer(r'\$([A-Za-z_][A-Za-z0-9_]*)', expr):
+                # First, expand ${VAR} and ${N} (braced form) - including positional params
+                for var_match in re.finditer(r'\$\{([A-Za-z_][A-Za-z0-9_]*|\d+)\}', expr):
+                    var_name = var_match.group(1)
+                    var_value = self._get_variable(var_name) or '0'
+                    try:
+                        int(var_value)
+                    except ValueError:
+                        var_value = '0'
+                    expanded_expr = expanded_expr.replace(f'${{{var_name}}}', var_value)
+
+                # Then expand $VAR and $N (non-braced form)
+                for var_match in re.finditer(r'\$([A-Za-z_][A-Za-z0-9_]*|\d+)', expanded_expr):
                     var_name = var_match.group(1)
                     var_value = self._get_variable(var_name) or '0'
                     # Try to convert to int, default to 0 if not numeric
@@ -784,91 +819,21 @@ class Shell:
         Returns:
             Exit code of last executed command
         """
-        parsed = self._parse_for_loop(lines)
+        parsed = self.control_parser.parse_for_loop(lines)
 
         if not parsed:
             self.console.print("[red]Syntax error: invalid for loop syntax[/red]", highlight=False)
             self.console.print("[yellow]Expected: for var in items; do commands; done[/yellow]", highlight=False)
             return 1
 
-        var_name = parsed['var']
-        items = parsed['items']
-        commands = parsed['commands']
-
-        # Execute loop for each item
-        last_exit_code = 0
-        for item in items:
-            # Set loop variable
-            self.env[var_name] = item
-
-            # Execute commands in loop body
-            i = 0
-            while i < len(commands):
-                cmd = commands[i]
-
-                # Check if this is a nested for loop
-                if cmd.strip().startswith('for '):
-                    # Collect the nested for loop
-                    nested_for_lines = [cmd]
-                    for_depth = 1
-                    i += 1
-                    while i < len(commands):
-                        next_cmd = commands[i]
-                        nested_for_lines.append(next_cmd)
-                        if next_cmd.strip().startswith('for '):
-                            for_depth += 1
-                        elif next_cmd.strip() == 'done':
-                            for_depth -= 1
-                            if for_depth == 0:
-                                break
-                        i += 1
-                    # Execute the nested for loop
-                    last_exit_code = self.execute_for_loop(nested_for_lines)
-                    # Break and continue in nested loop only affect the nested loop
-                    # They should NOT propagate to the outer loop
-                    # Reset them to 0 so they don't affect the outer loop
-                    if last_exit_code in [EXIT_CODE_BREAK, EXIT_CODE_CONTINUE]:
-                        last_exit_code = 0
-                # Check if this is a nested if statement
-                elif cmd.strip().startswith('if '):
-                    # Collect the nested if statement with depth tracking
-                    nested_if_lines = [cmd]
-                    if_depth = 1
-                    i += 1
-                    while i < len(commands):
-                        next_cmd = commands[i]
-                        nested_if_lines.append(next_cmd)
-                        # Track nested if statements
-                        if next_cmd.strip().startswith('if '):
-                            if_depth += 1
-                        elif next_cmd.strip() == 'fi':
-                            if_depth -= 1
-                            if if_depth == 0:
-                                break
-                        i += 1
-                    # Execute the nested if statement
-                    last_exit_code = self.execute_if_statement(nested_if_lines)
-                    # Check for break or continue from within if statement
-                    if last_exit_code == EXIT_CODE_BREAK:
-                        # break: exit the for loop
-                        return last_exit_code
-                    elif last_exit_code == EXIT_CODE_CONTINUE:
-                        # continue: skip to next iteration
-                        break  # Break out of the while loop (commands in current iteration)
-                else:
-                    # Regular command
-                    last_exit_code = self.execute(cmd)
-                    # Check for break or continue
-                    if last_exit_code == EXIT_CODE_BREAK:
-                        # break: exit the for loop
-                        return last_exit_code
-                    elif last_exit_code == EXIT_CODE_CONTINUE:
-                        # continue: skip to next iteration
-                        break  # Break out of the while loop (commands in current iteration)
-
-                i += 1
-
-        return last_exit_code
+        try:
+            return self.executor.execute_for(parsed)
+        except BreakException:
+            # Break at top level - should not happen normally
+            return 0
+        except ContinueException:
+            # Continue at top level - should not happen normally
+            return 0
 
     def execute_while_loop(self, lines: List[str]) -> int:
         """
@@ -880,118 +845,21 @@ class Shell:
         Returns:
             Exit code of last executed command
         """
-        parsed = self._parse_while_loop(lines)
+        parsed = self.control_parser.parse_while_loop(lines)
 
         if not parsed:
             self.console.print("[red]Syntax error: invalid while loop syntax[/red]", highlight=False)
             self.console.print("[yellow]Expected: while condition; do commands; done[/yellow]", highlight=False)
             return 1
 
-        condition_cmd = parsed['condition']
-        commands = parsed['commands']
-
-        # Execute loop while condition is true (exit code 0)
-        last_exit_code = 0
-
-        while True:
-            # Execute the condition command
-            condition_exit_code = self.execute(condition_cmd)
-
-            # If condition is false (non-zero exit code), exit loop
-            if condition_exit_code != 0:
-                break
-
-            # Execute commands in loop body
-            i = 0
-            while i < len(commands):
-                cmd = commands[i]
-
-                # Check if this is a nested while loop
-                if cmd.strip().startswith('while '):
-                    # Collect the nested while loop
-                    nested_while_lines = [cmd]
-                    while_depth = 1
-                    i += 1
-                    while i < len(commands):
-                        next_cmd = commands[i]
-                        nested_while_lines.append(next_cmd)
-                        if next_cmd.strip().startswith('while '):
-                            while_depth += 1
-                        elif next_cmd.strip() == 'done':
-                            while_depth -= 1
-                            if while_depth == 0:
-                                break
-                        i += 1
-                    # Execute the nested while loop
-                    last_exit_code = self.execute_while_loop(nested_while_lines)
-                    # Break and continue in nested loop only affect the nested loop
-                    # They should NOT propagate to the outer loop
-                    # Reset them to 0 so they don't affect the outer loop
-                    if last_exit_code in [EXIT_CODE_BREAK, EXIT_CODE_CONTINUE]:
-                        last_exit_code = 0
-                # Check if this is a nested for loop
-                elif cmd.strip().startswith('for '):
-                    # Collect the nested for loop
-                    nested_for_lines = [cmd]
-                    for_depth = 1
-                    i += 1
-                    while i < len(commands):
-                        next_cmd = commands[i]
-                        nested_for_lines.append(next_cmd)
-                        if next_cmd.strip().startswith('for '):
-                            for_depth += 1
-                        elif next_cmd.strip() == 'done':
-                            for_depth -= 1
-                            if for_depth == 0:
-                                break
-                        i += 1
-                    # Execute the nested for loop
-                    last_exit_code = self.execute_for_loop(nested_for_lines)
-                    # Break and continue in nested loop only affect the nested loop
-                    # They should NOT propagate to the outer loop
-                    # Reset them to 0 so they don't affect the outer loop
-                    if last_exit_code in [EXIT_CODE_BREAK, EXIT_CODE_CONTINUE]:
-                        last_exit_code = 0
-                # Check if this is a nested if statement
-                elif cmd.strip().startswith('if '):
-                    # Collect the nested if statement with depth tracking
-                    nested_if_lines = [cmd]
-                    if_depth = 1
-                    i += 1
-                    while i < len(commands):
-                        next_cmd = commands[i]
-                        nested_if_lines.append(next_cmd)
-                        # Track nested if statements
-                        if next_cmd.strip().startswith('if '):
-                            if_depth += 1
-                        elif next_cmd.strip() == 'fi':
-                            if_depth -= 1
-                            if if_depth == 0:
-                                break
-                        i += 1
-                    # Execute the nested if statement
-                    last_exit_code = self.execute_if_statement(nested_if_lines)
-                    # Check for break or continue from within if statement
-                    if last_exit_code == EXIT_CODE_BREAK:
-                        # break: exit the while loop
-                        return last_exit_code
-                    elif last_exit_code == EXIT_CODE_CONTINUE:
-                        # continue: skip to next iteration
-                        break  # Break out of the while loop (commands in current iteration)
-                else:
-                    # Regular command
-                    last_exit_code = self.execute(cmd)
-                    # Check for break or continue
-                    if last_exit_code == EXIT_CODE_BREAK:
-                        # break: exit the while loop
-                        return last_exit_code
-                    elif last_exit_code == EXIT_CODE_CONTINUE:
-                        # continue: skip to next iteration
-                        break  # Break out of the while loop (commands in current iteration)
-
-                i += 1
-
-        return last_exit_code
+        try:
+            return self.executor.execute_while(parsed)
+        except BreakException:
+            # Break at top level - should not happen normally
+            return 0
+        except ContinueException:
+            # Continue at top level - should not happen normally
+            return 0
 
     def _parse_for_loop(self, lines: List[str]) -> dict:
         """
@@ -1219,40 +1087,16 @@ class Shell:
         Returns:
             Exit code of executed commands
         """
-        parsed = self._parse_if_statement(lines)
+        parsed = self.control_parser.parse_if_statement(lines)
 
         # Check if parsing was successful
-        if not parsed or not parsed.get('conditions'):
+        if not parsed or not parsed.branches:
             self.console.print("[red]Syntax error: invalid if statement syntax[/red]", highlight=False)
             self.console.print("[yellow]Expected: if condition; then commands; fi[/yellow]", highlight=False)
             return 1
 
-        # Evaluate conditions in order
-        for condition_cmd, commands_block in parsed['conditions']:
-            # Execute the condition command
-            exit_code = self.execute(condition_cmd)
-
-            # If condition is true (exit code 0), execute this block
-            if exit_code == 0:
-                last_exit_code = 0
-                for cmd in commands_block:
-                    last_exit_code = self.execute(cmd)
-                    # If break or continue, return immediately to propagate to for loop
-                    if last_exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
-                        return last_exit_code
-                return last_exit_code
-
-        # If no condition was true, execute else block if present
-        if parsed['else_block']:
-            last_exit_code = 0
-            for cmd in parsed['else_block']:
-                last_exit_code = self.execute(cmd)
-                # If break or continue, return immediately to propagate to for loop
-                if last_exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
-                    return last_exit_code
-            return last_exit_code
-
-        return 0
+        # Execute using the new executor - exceptions will propagate
+        return self.executor.execute_if(parsed)
 
     def _parse_if_statement(self, lines: List[str]) -> dict:
         """
@@ -1451,6 +1295,12 @@ class Shell:
         """
         Execute a user-defined function
 
+        Delegates to executor.execute_function_call() which handles:
+        - Parameter passing ($1, $2, etc.)
+        - Local variable scope
+        - Return value handling via ReturnException
+        - Proper cleanup on exit
+
         Args:
             func_name: Function name
             args: Function arguments
@@ -1458,146 +1308,7 @@ class Shell:
         Returns:
             Exit code of function execution
         """
-        if func_name not in self.functions:
-            return 127  # Command not found
-
-        func_def = self.functions[func_name]
-
-        # Save current positional parameters
-        saved_params = {}
-        for key in list(self.env.keys()):
-            if key.isdigit() or key in ('#', '@', '0'):
-                saved_params[key] = self.env[key]
-
-        # Track function depth for local command
-        current_depth = int(self.env.get('_function_depth', '0'))
-        self.env['_function_depth'] = str(current_depth + 1)
-
-        # Save local variables that will be shadowed
-        saved_locals = {}
-        for key in list(self.env.keys()):
-            if key.startswith('_local_'):
-                saved_locals[key] = self.env[key]
-
-        # Set new positional parameters
-        self.env['0'] = func_name
-        self.env['#'] = str(len(args))
-        self.env['@'] = ' '.join(args)
-        for i, arg in enumerate(args, 1):
-            self.env[str(i)] = arg
-
-        # Create new local scope
-        self.local_scopes.append({})
-
-        # Execute function body
-        last_exit_code = 0
-        try:
-            i = 0
-            while i < len(func_def['body']):
-                cmd = func_def['body'][i]
-                last_exit_code = self.execute(cmd)
-
-                # Handle multi-line constructs
-                if last_exit_code == EXIT_CODE_IF_STATEMENT_NEEDED:
-                    # Collect if/then/else/fi statement
-                    if_lines = [cmd]
-                    if_depth = 1
-                    i += 1
-                    while i < len(func_def['body']):
-                        next_line = func_def['body'][i]
-                        if_lines.append(next_line)
-                        next_line_stripped = self._strip_comment(next_line).strip()
-                        if next_line_stripped.startswith('if '):
-                            if_depth += 1
-                        elif next_line_stripped == 'fi':
-                            if_depth -= 1
-                            if if_depth == 0:
-                                break
-                        i += 1
-                    last_exit_code = self.execute_if_statement(if_lines)
-
-                elif last_exit_code == EXIT_CODE_FOR_LOOP_NEEDED:
-                    # Collect for/do/done loop
-                    for_lines = [cmd]
-                    for_depth = 1
-                    i += 1
-                    while i < len(func_def['body']):
-                        next_line = func_def['body'][i]
-                        for_lines.append(next_line)
-                        next_line_stripped = self._strip_comment(next_line).strip()
-                        if next_line_stripped.startswith('for '):
-                            for_depth += 1
-                        elif next_line_stripped == 'done':
-                            for_depth -= 1
-                            if for_depth == 0:
-                                break
-                        i += 1
-                    last_exit_code = self.execute_for_loop(for_lines)
-
-                elif last_exit_code == EXIT_CODE_WHILE_LOOP_NEEDED:
-                    # Collect while/do/done loop
-                    while_lines = [cmd]
-                    while_depth = 1
-                    i += 1
-                    while i < len(func_def['body']):
-                        next_line = func_def['body'][i]
-                        while_lines.append(next_line)
-                        next_line_stripped = self._strip_comment(next_line).strip()
-                        if next_line_stripped.startswith('while '):
-                            while_depth += 1
-                        elif next_line_stripped == 'done':
-                            while_depth -= 1
-                            if while_depth == 0:
-                                break
-                        i += 1
-                    last_exit_code = self.execute_while_loop(while_lines)
-
-                # Check for return
-                if last_exit_code == EXIT_CODE_RETURN:
-                    # Get the return value from special variable
-                    last_exit_code = int(self._get_variable('_return_value') or '0')
-                    break
-
-                # Break and continue should not escape function scope
-                if last_exit_code in [EXIT_CODE_BREAK, EXIT_CODE_CONTINUE]:
-                    self.console.print(f"[red]{func_name}: break/continue outside loop[/red]", highlight=False)
-                    last_exit_code = 1
-                    break
-
-                i += 1
-
-        finally:
-            # Remove local scope
-            if self.local_scopes:
-                self.local_scopes.pop()
-
-            # Clear local variables from this function
-            for key in list(self.env.keys()):
-                if key.startswith('_local_'):
-                    del self.env[key]
-
-            # Restore saved local variables
-            for key, value in saved_locals.items():
-                self.env[key] = value
-
-            # Restore function depth
-            self.env['_function_depth'] = str(current_depth)
-            if current_depth == 0:
-                # Clean up if we're exiting the outermost function
-                if '_function_depth' in self.env:
-                    del self.env['_function_depth']
-
-            # Restore positional parameters
-            # First, clear current positional params
-            for key in list(self.env.keys()):
-                if key.isdigit() or key in ('#', '@', '0'):
-                    del self.env[key]
-
-            # Then restore saved params
-            for key, value in saved_params.items():
-                self.env[key] = value
-
-        return last_exit_code
+        return self.executor.execute_function_call(func_name, args)
 
     def execute(self, command_line: str, stdin_data: Optional[bytes] = None, heredoc_data: Optional[bytes] = None) -> int:
         """
@@ -1628,11 +1339,16 @@ class Shell:
         if func_def_match:
             # Check if it's a complete single-line function
             if '}' in command_line:
-                # Single-line function definition
+                # Single-line function definition - use new AST parser
                 lines = [command_line]
-                func_def = self._parse_function_definition(lines)
-                if func_def and func_def['name']:
-                    self.functions[func_def['name']] = func_def
+                func_ast = self.control_parser.parse_function_definition(lines)
+                if func_ast and func_ast.name:
+                    # Store as AST-based function
+                    self.functions[func_ast.name] = {
+                        'name': func_ast.name,
+                        'body': func_ast.body,
+                        'is_ast': True
+                    }
                     return 0
                 else:
                     self.console.print("[red]Syntax error: invalid function definition[/red]", highlight=False)
@@ -2316,10 +2032,15 @@ class Shell:
                             self.console.print("\n^C", highlight=False)
                             continue
 
-                        # Parse and store the function
-                        func_def = self._parse_function_definition(func_lines)
-                        if func_def and func_def['name']:
-                            self.functions[func_def['name']] = func_def
+                        # Parse and store the function using AST parser
+                        func_ast = self.control_parser.parse_function_definition(func_lines)
+                        if func_ast and func_ast.name:
+                            # Store as AST-based function
+                            self.functions[func_ast.name] = {
+                                'name': func_ast.name,
+                                'body': func_ast.body,
+                                'is_ast': True
+                            }
                             exit_code = 0
                         else:
                             self.console.print("[red]Syntax error: invalid function definition[/red]", highlight=False)

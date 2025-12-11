@@ -77,10 +77,6 @@ def execute_script_file(shell, script_path, script_args=None):
 
                     # Execute the for loop
                     exit_code = shell.execute_for_loop(for_lines)
-                    # continue/break are normal control flow, not errors
-                    if exit_code != 0 and exit_code not in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
-                        sys.stderr.write(f"Error at line {line_num}: for loop failed with exit code {exit_code}\n")
-                        return exit_code
                     # Reset control flow codes to 0 for script execution
                     if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
                         exit_code = 0
@@ -106,10 +102,6 @@ def execute_script_file(shell, script_path, script_args=None):
 
                     # Execute the while loop
                     exit_code = shell.execute_while_loop(while_lines)
-                    # continue/break are normal control flow, not errors
-                    if exit_code != 0 and exit_code not in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
-                        sys.stderr.write(f"Error at line {line_num}: while loop failed with exit code {exit_code}\n")
-                        return exit_code
                     # Reset control flow codes to 0 for script execution
                     if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
                         exit_code = 0
@@ -129,10 +121,14 @@ def execute_script_file(shell, script_path, script_args=None):
                             break
                         i += 1
 
-                    # Parse and store the function
-                    func_def = shell._parse_function_definition(func_lines)
-                    if func_def and func_def['name']:
-                        shell.functions[func_def['name']] = func_def
+                    # Parse and store the function using AST parser
+                    func_ast = shell.control_parser.parse_function_definition(func_lines)
+                    if func_ast and func_ast.name:
+                        shell.functions[func_ast.name] = {
+                            'name': func_ast.name,
+                            'body': func_ast.body,
+                            'is_ast': True
+                        }
                         exit_code = 0
                     else:
                         sys.stderr.write(f"Error at line {line_num}: invalid function definition\n")
@@ -160,13 +156,11 @@ def execute_script_file(shell, script_path, script_args=None):
 
                     # Execute the if statement
                     exit_code = shell.execute_if_statement(if_lines)
-                    if exit_code != 0:
-                        sys.stderr.write(f"Error at line {line_num}: if statement failed with exit code {exit_code}\n")
-                        return exit_code
-                # If a command fails, stop execution
-                elif exit_code != 0:
-                    sys.stderr.write(f"Error at line {line_num}: command failed with exit code {exit_code}\n")
-                    return exit_code
+                    # Note: Non-zero exit code from if/for/while is normal
+                    # (condition evaluated to false or loop completed)
+                # Update $? with the exit code but don't stop on non-zero
+                # (bash default behavior - scripts continue unless set -e)
+                shell.env['?'] = str(exit_code)
             except SystemExit as e:
                 # Handle exit command - return the exit code
                 return e.code if e.code is not None else 0
@@ -274,56 +268,70 @@ def main():
                 stdin_data = sys.stdin.buffer.read()
 
         # Check if command contains semicolons (multiple commands)
-        # Split intelligently: respect if/then/else/fi and for/do/done blocks
+        # Split intelligently: respect if/then/else/fi, for/do/done blocks, and functions
         if ';' in command:
-            # Split by semicolons but preserve control flow statements as single units
+            # Smart split that tracks brace depth for functions
+            import re
             commands = []
             current_cmd = []
             in_control_flow = False
-            control_flow_type = None  # 'if' or 'for'
+            control_flow_type = None
+            brace_depth = 0
 
             for part in command.split(';'):
                 part = part.strip()
                 if not part:
                     continue
 
+                # Track brace depth for functions
+                brace_depth += part.count('{') - part.count('}')
+
                 # Check if this part starts a control flow statement or function
-                import re
-                if part.startswith('if '):
-                    in_control_flow = True
-                    control_flow_type = 'if'
-                    current_cmd.append(part)
-                elif part.startswith('for '):
-                    in_control_flow = True
-                    control_flow_type = 'for'
-                    current_cmd.append(part)
-                elif part.startswith('while '):
-                    in_control_flow = True
-                    control_flow_type = 'while'
-                    current_cmd.append(part)
-                elif re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)', part) or part.startswith('function '):
-                    in_control_flow = True
-                    control_flow_type = 'function'
-                    current_cmd.append(part)
-                # Check if we're in a control flow statement
-                elif in_control_flow:
+                if not in_control_flow:
+                    if part.startswith('if '):
+                        in_control_flow = True
+                        control_flow_type = 'if'
+                        current_cmd.append(part)
+                    elif part.startswith('for '):
+                        in_control_flow = True
+                        control_flow_type = 'for'
+                        current_cmd.append(part)
+                    elif part.startswith('while '):
+                        in_control_flow = True
+                        control_flow_type = 'while'
+                        current_cmd.append(part)
+                    elif re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)', part) or part.startswith('function '):
+                        # Function definition
+                        current_cmd.append(part)
+                        if brace_depth == 0 and '}' in part:
+                            # Complete single-line function (e.g., "foo() { echo hi; }")
+                            commands.append('; '.join(current_cmd))
+                            current_cmd = []
+                        else:
+                            in_control_flow = True
+                            control_flow_type = 'function'
+                    else:
+                        # Regular command
+                        commands.append(part)
+                else:
+                    # We're in a control flow statement
                     current_cmd.append(part)
                     # Check if this part ends the control flow statement
-                    if (control_flow_type == 'if' and 'fi' in part) or \
-                       (control_flow_type == 'for' and 'done' in part) or \
-                       (control_flow_type == 'while' and 'done' in part) or \
-                       (control_flow_type == 'function' and '}' in part):
-                        # Complete control flow statement
+                    ended = False
+                    if control_flow_type == 'if' and part.strip() == 'fi':
+                        ended = True
+                    elif control_flow_type == 'for' and part.strip() == 'done':
+                        ended = True
+                    elif control_flow_type == 'while' and part.strip() == 'done':
+                        ended = True
+                    elif control_flow_type == 'function' and brace_depth == 0:
+                        ended = True
+
+                    if ended:
                         commands.append('; '.join(current_cmd))
                         current_cmd = []
                         in_control_flow = False
                         control_flow_type = None
-                else:
-                    # Regular command
-                    if current_cmd:
-                        commands.append('; '.join(current_cmd))
-                        current_cmd = []
-                    commands.append(part)
 
             # Add any remaining command
             if current_cmd:

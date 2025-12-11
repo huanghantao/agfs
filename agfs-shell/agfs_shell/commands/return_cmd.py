@@ -6,6 +6,7 @@ Note: Module name is return_cmd.py because 'return' is a Python keyword.
 
 from ..process import Process
 from ..command_decorators import command
+from ..control_flow import ReturnException
 from ..exit_codes import EXIT_CODE_RETURN
 from . import register_command
 
@@ -29,11 +30,11 @@ def cmd_return(process: Process) -> int:
         try:
             exit_code = int(process.args[0])
         except ValueError:
-            process.stderr.write(f"return: {process.args[0]}: numeric argument required\n")
+            process.stderr.write(f"return: {process.args[0]}: numeric argument required\n".encode())
             return 2
 
-    # Store return value in env for shell to retrieve
+    # Store return value in env for legacy code path
     process.env['_return_value'] = str(exit_code)
 
-    # Return special code to signal return statement
-    return EXIT_CODE_RETURN
+    # Raise exception to be caught by executor or execute_function
+    raise ReturnException(exit_code=exit_code)
