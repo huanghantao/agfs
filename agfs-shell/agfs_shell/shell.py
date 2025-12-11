@@ -17,6 +17,7 @@ from .exit_codes import (
     EXIT_CODE_CONTINUE,
     EXIT_CODE_BREAK,
     EXIT_CODE_FOR_LOOP_NEEDED,
+    EXIT_CODE_WHILE_LOOP_NEEDED,
     EXIT_CODE_IF_STATEMENT_NEEDED,
     EXIT_CODE_HEREDOC_NEEDED,
     EXIT_CODE_FUNCTION_DEF_NEEDED,
@@ -823,12 +824,10 @@ class Shell:
                         i += 1
                     # Execute the nested for loop
                     last_exit_code = self.execute_for_loop(nested_for_lines)
-                    # If nested loop returned break, propagate it up
-                    if last_exit_code == EXIT_CODE_BREAK:
-                        return last_exit_code
-                    # If nested loop returned continue, it only affects the nested loop
-                    # so we reset it to 0
-                    if last_exit_code == EXIT_CODE_CONTINUE:
+                    # Break and continue in nested loop only affect the nested loop
+                    # They should NOT propagate to the outer loop
+                    # Reset them to 0 so they don't affect the outer loop
+                    if last_exit_code in [EXIT_CODE_BREAK, EXIT_CODE_CONTINUE]:
                         last_exit_code = 0
                 # Check if this is a nested if statement
                 elif cmd.strip().startswith('if '):
@@ -862,6 +861,129 @@ class Shell:
                     # Check for break or continue
                     if last_exit_code == EXIT_CODE_BREAK:
                         # break: exit the for loop
+                        return last_exit_code
+                    elif last_exit_code == EXIT_CODE_CONTINUE:
+                        # continue: skip to next iteration
+                        break  # Break out of the while loop (commands in current iteration)
+
+                i += 1
+
+        return last_exit_code
+
+    def execute_while_loop(self, lines: List[str]) -> int:
+        """
+        Execute a while/do/done loop
+
+        Args:
+            lines: List of lines making up the while loop
+
+        Returns:
+            Exit code of last executed command
+        """
+        parsed = self._parse_while_loop(lines)
+
+        if not parsed:
+            self.console.print("[red]Syntax error: invalid while loop syntax[/red]", highlight=False)
+            self.console.print("[yellow]Expected: while condition; do commands; done[/yellow]", highlight=False)
+            return 1
+
+        condition_cmd = parsed['condition']
+        commands = parsed['commands']
+
+        # Execute loop while condition is true (exit code 0)
+        last_exit_code = 0
+
+        while True:
+            # Execute the condition command
+            condition_exit_code = self.execute(condition_cmd)
+
+            # If condition is false (non-zero exit code), exit loop
+            if condition_exit_code != 0:
+                break
+
+            # Execute commands in loop body
+            i = 0
+            while i < len(commands):
+                cmd = commands[i]
+
+                # Check if this is a nested while loop
+                if cmd.strip().startswith('while '):
+                    # Collect the nested while loop
+                    nested_while_lines = [cmd]
+                    while_depth = 1
+                    i += 1
+                    while i < len(commands):
+                        next_cmd = commands[i]
+                        nested_while_lines.append(next_cmd)
+                        if next_cmd.strip().startswith('while '):
+                            while_depth += 1
+                        elif next_cmd.strip() == 'done':
+                            while_depth -= 1
+                            if while_depth == 0:
+                                break
+                        i += 1
+                    # Execute the nested while loop
+                    last_exit_code = self.execute_while_loop(nested_while_lines)
+                    # Break and continue in nested loop only affect the nested loop
+                    # They should NOT propagate to the outer loop
+                    # Reset them to 0 so they don't affect the outer loop
+                    if last_exit_code in [EXIT_CODE_BREAK, EXIT_CODE_CONTINUE]:
+                        last_exit_code = 0
+                # Check if this is a nested for loop
+                elif cmd.strip().startswith('for '):
+                    # Collect the nested for loop
+                    nested_for_lines = [cmd]
+                    for_depth = 1
+                    i += 1
+                    while i < len(commands):
+                        next_cmd = commands[i]
+                        nested_for_lines.append(next_cmd)
+                        if next_cmd.strip().startswith('for '):
+                            for_depth += 1
+                        elif next_cmd.strip() == 'done':
+                            for_depth -= 1
+                            if for_depth == 0:
+                                break
+                        i += 1
+                    # Execute the nested for loop
+                    last_exit_code = self.execute_for_loop(nested_for_lines)
+                    # Break and continue in nested loop only affect the nested loop
+                    # They should NOT propagate to the outer loop
+                    # Reset them to 0 so they don't affect the outer loop
+                    if last_exit_code in [EXIT_CODE_BREAK, EXIT_CODE_CONTINUE]:
+                        last_exit_code = 0
+                # Check if this is a nested if statement
+                elif cmd.strip().startswith('if '):
+                    # Collect the nested if statement with depth tracking
+                    nested_if_lines = [cmd]
+                    if_depth = 1
+                    i += 1
+                    while i < len(commands):
+                        next_cmd = commands[i]
+                        nested_if_lines.append(next_cmd)
+                        # Track nested if statements
+                        if next_cmd.strip().startswith('if '):
+                            if_depth += 1
+                        elif next_cmd.strip() == 'fi':
+                            if_depth -= 1
+                            if if_depth == 0:
+                                break
+                        i += 1
+                    # Execute the nested if statement
+                    last_exit_code = self.execute_if_statement(nested_if_lines)
+                    # Check for break or continue from within if statement
+                    if last_exit_code == EXIT_CODE_BREAK:
+                        # break: exit the while loop
+                        return last_exit_code
+                    elif last_exit_code == EXIT_CODE_CONTINUE:
+                        # continue: skip to next iteration
+                        break  # Break out of the while loop (commands in current iteration)
+                else:
+                    # Regular command
+                    last_exit_code = self.execute(cmd)
+                    # Check for break or continue
+                    if last_exit_code == EXIT_CODE_BREAK:
+                        # break: exit the while loop
                         return last_exit_code
                     elif last_exit_code == EXIT_CODE_CONTINUE:
                         # continue: skip to next iteration
@@ -993,6 +1115,96 @@ class Shell:
         # Validate the parsed result
         # Must have: variable name, items, and at least reached 'do' state
         if not result['var']:
+            return None
+
+        return result
+
+    def _parse_while_loop(self, lines: List[str]) -> dict:
+        """
+        Parse a while/do/done loop from a list of lines
+
+        Returns:
+            Dict with structure: {
+                'condition': condition_command,
+                'commands': [list of commands]
+            }
+        """
+        result = {
+            'condition': None,
+            'commands': []
+        }
+
+        state = 'while'  # States: 'while', 'do'
+        first_while_parsed = False  # Track if we've parsed the first while statement
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            i += 1
+
+            if not line or line.startswith('#'):
+                continue
+
+            # Strip comments before checking keywords
+            line_no_comment = self._strip_comment(line).strip()
+
+            if line_no_comment == 'done':
+                # End of while loop
+                break
+            elif line_no_comment == 'do':
+                state = 'do'
+            elif line_no_comment.startswith('do '):
+                # 'do' with command on same line
+                state = 'do'
+                cmd_after_do = line_no_comment[3:].strip()
+                if cmd_after_do:
+                    result['commands'].append(cmd_after_do)
+            elif line_no_comment.startswith('while '):
+                # Only parse the FIRST while statement
+                # Nested while loops should be treated as commands
+                if not first_while_parsed:
+                    # Parse: while condition
+                    # or: while condition; do
+                    condition = line_no_comment[6:].strip()
+
+                    # Remove trailing '; do' or 'do' if present
+                    if condition.endswith('; do'):
+                        condition = condition[:-4].strip()
+                        state = 'do'
+                    elif condition.endswith(' do'):
+                        condition = condition[:-3].strip()
+                        state = 'do'
+
+                    # Remove inline comments from condition
+                    condition = self._strip_comment(condition)
+
+                    result['condition'] = condition
+                    first_while_parsed = True
+                else:
+                    # This is a nested while loop - collect it as a command
+                    if state == 'do':
+                        result['commands'].append(line)
+                        # Now collect the rest of the nested loop (do...done)
+                        while i < len(lines):
+                            nested_line = lines[i].strip()
+                            result['commands'].append(nested_line)
+                            # Strip comments before checking for 'done'
+                            nested_line_no_comment = self._strip_comment(nested_line).strip()
+                            if nested_line_no_comment == 'done':
+                                break
+                            i += 1
+            else:
+                # Regular command in loop body
+                if state == 'do':
+                    result['commands'].append(line)
+                elif state == 'while' and first_while_parsed:
+                    # We're in 'while' state after parsing the while statement,
+                    # but seeing a regular command before 'do' - this is a syntax error
+                    return None
+
+        # Validate the parsed result
+        # Must have: condition and at least reached 'do' state
+        if not result['condition']:
             return None
 
         return result
@@ -1322,6 +1534,24 @@ class Shell:
                         i += 1
                     last_exit_code = self.execute_for_loop(for_lines)
 
+                elif last_exit_code == EXIT_CODE_WHILE_LOOP_NEEDED:
+                    # Collect while/do/done loop
+                    while_lines = [cmd]
+                    while_depth = 1
+                    i += 1
+                    while i < len(func_def['body']):
+                        next_line = func_def['body'][i]
+                        while_lines.append(next_line)
+                        next_line_stripped = self._strip_comment(next_line).strip()
+                        if next_line_stripped.startswith('while '):
+                            while_depth += 1
+                        elif next_line_stripped == 'done':
+                            while_depth -= 1
+                            if while_depth == 0:
+                                break
+                        i += 1
+                    last_exit_code = self.execute_while_loop(while_lines)
+
                 # Check for return
                 if last_exit_code == EXIT_CODE_RETURN:
                     # Get the return value from special variable
@@ -1434,6 +1664,21 @@ class Shell:
                 # Multi-line for loop - signal to REPL to collect more lines
                 # Return special code to signal for loop collection needed
                 return EXIT_CODE_FOR_LOOP_NEEDED
+
+        # Check for while loop (special handling required)
+        if command_line.strip().startswith('while '):
+            # Check if it's a complete single-line while loop
+            # Look for 'done' as a separate word/keyword, not as substring
+            import re
+            if re.search(r'\bdone\b', command_line):
+                # Single-line while loop - parse and execute directly
+                parts = re.split(r';\s*', command_line)
+                lines = [part.strip() for part in parts if part.strip()]
+                return self.execute_while_loop(lines)
+            else:
+                # Multi-line while loop - signal to REPL to collect more lines
+                # Return special code to signal while loop collection needed
+                return EXIT_CODE_WHILE_LOOP_NEEDED
 
         # Check for if statement (special handling required)
         if command_line.strip().startswith('if '):
@@ -1994,6 +2239,36 @@ class Shell:
                         # Update $? with the exit code
                         self.env['?'] = str(exit_code)
 
+                    # Check if while-loop is needed
+                    elif exit_code == EXIT_CODE_WHILE_LOOP_NEEDED:
+                        # Collect while/do/done loop
+                        while_lines = [command]
+                        while_depth = 1  # Track nesting depth
+                        try:
+                            while True:
+                                while_line = input("> ")
+                                while_lines.append(while_line)
+                                # Count nested while loops
+                                stripped = while_line.strip()
+                                if stripped.startswith('while '):
+                                    while_depth += 1
+                                elif stripped == 'done':
+                                    while_depth -= 1
+                                    if while_depth == 0:
+                                        break
+                        except EOFError:
+                            # Ctrl+D before done
+                            self.console.print("\nWarning: while-loop ended by end-of-file (wanted `done`)", highlight=False)
+                        except KeyboardInterrupt:
+                            # Ctrl+C during while-loop - cancel
+                            self.console.print("\n^C", highlight=False)
+                            continue
+
+                        # Execute the while loop
+                        exit_code = self.execute_while_loop(while_lines)
+                        # Update $? with the exit code
+                        self.env['?'] = str(exit_code)
+
                     # Check if if-statement is needed
                     elif exit_code == EXIT_CODE_IF_STATEMENT_NEEDED:
                         # Collect if/then/else/fi statement
@@ -2092,6 +2367,7 @@ class Shell:
                             EXIT_CODE_CONTINUE,
                             EXIT_CODE_BREAK,
                             EXIT_CODE_FOR_LOOP_NEEDED,
+                            EXIT_CODE_WHILE_LOOP_NEEDED,
                             EXIT_CODE_IF_STATEMENT_NEEDED,
                             EXIT_CODE_HEREDOC_NEEDED,
                             EXIT_CODE_FUNCTION_DEF_NEEDED,

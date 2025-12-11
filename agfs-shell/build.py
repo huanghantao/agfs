@@ -136,6 +136,7 @@ def main():
                 "uv", "pip", "install",
                 "--target", str(lib_dir),
                 "--python", sys.executable,
+                "--upgrade",  # Always upgrade to latest versions
                 "requests>=2.31.0"  # Install pyagfs's dependencies with their transitive deps
             ], cwd=str(script_dir))
         else:
@@ -152,14 +153,19 @@ def main():
 
         # Install all agfs-shell dependencies from pyproject.toml (excluding pyagfs which we already copied)
         # Including webapp dependencies for portable package
+        # Use --upgrade to ensure we always get the latest versions
         subprocess.check_call([
             "uv", "pip", "install",
             "--target", str(lib_dir),
             "--python", sys.executable,
+            "--upgrade",  # Always upgrade to latest versions
+            "--reinstall",  # Force reinstall to ensure clean state
             "rich",
             "jq",
-            "aiohttp>=3.9.0",
-            "aiohttp-cors>=0.7.0"
+            "llm",  # Required for LLM integration
+            "pyyaml",  # Required for YAML parsing
+            "aiohttp>=3.9.0",  # Webapp dependency
+            "aiohttp-cors>=0.7.0"  # Webapp dependency
         ], cwd=str(script_dir))
 
         # Build and copy webapp

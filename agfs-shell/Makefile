@@ -29,7 +29,7 @@ test:
 	@echo "Running tests with pytest..."
 	@uv run pytest tests/
 
-install: build
+install: clean build
 	@echo "Installing agfs-shell to $(INSTALL_DIR)..."
 	@rm -rf $(INSTALL_DIR)
 	@mkdir -p $(INSTALL_DIR)

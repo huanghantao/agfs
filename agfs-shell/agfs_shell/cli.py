@@ -9,6 +9,7 @@ from .exit_codes import (
     EXIT_CODE_CONTINUE,
     EXIT_CODE_BREAK,
     EXIT_CODE_FOR_LOOP_NEEDED,
+    EXIT_CODE_WHILE_LOOP_NEEDED,
     EXIT_CODE_IF_STATEMENT_NEEDED,
     EXIT_CODE_HEREDOC_NEEDED,
     EXIT_CODE_FUNCTION_DEF_NEEDED
@@ -79,6 +80,35 @@ def execute_script_file(shell, script_path, script_args=None):
                     # continue/break are normal control flow, not errors
                     if exit_code != 0 and exit_code not in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
                         sys.stderr.write(f"Error at line {line_num}: for loop failed with exit code {exit_code}\n")
+                        return exit_code
+                    # Reset control flow codes to 0 for script execution
+                    if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
+                        exit_code = 0
+                # Check if while-loop needs to be collected
+                elif exit_code == EXIT_CODE_WHILE_LOOP_NEEDED:
+                    # Collect while/do/done loop
+                    while_lines = [line]
+                    while_depth = 1  # Track nesting depth
+                    i += 1
+                    while i < len(lines):
+                        next_line = lines[i].strip()
+                        while_lines.append(next_line)
+                        # Strip comments before checking keywords
+                        next_line_no_comment = shell._strip_comment(next_line).strip()
+                        # Count nested while loops
+                        if next_line_no_comment.startswith('while '):
+                            while_depth += 1
+                        elif next_line_no_comment == 'done':
+                            while_depth -= 1
+                            if while_depth == 0:
+                                break
+                        i += 1
+
+                    # Execute the while loop
+                    exit_code = shell.execute_while_loop(while_lines)
+                    # continue/break are normal control flow, not errors
+                    if exit_code != 0 and exit_code not in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
+                        sys.stderr.write(f"Error at line {line_num}: while loop failed with exit code {exit_code}\n")
                         return exit_code
                     # Reset control flow codes to 0 for script execution
                     if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
@@ -267,6 +297,10 @@ def main():
                     in_control_flow = True
                     control_flow_type = 'for'
                     current_cmd.append(part)
+                elif part.startswith('while '):
+                    in_control_flow = True
+                    control_flow_type = 'while'
+                    current_cmd.append(part)
                 elif re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)', part) or part.startswith('function '):
                     in_control_flow = True
                     control_flow_type = 'function'
@@ -277,6 +311,7 @@ def main():
                     # Check if this part ends the control flow statement
                     if (control_flow_type == 'if' and 'fi' in part) or \
                        (control_flow_type == 'for' and 'done' in part) or \
+                       (control_flow_type == 'while' and 'done' in part) or \
                        (control_flow_type == 'function' and '}' in part):
                         # Complete control flow statement
                         commands.append('; '.join(current_cmd))
@@ -301,6 +336,7 @@ def main():
                 stdin_data = None  # Only first command gets stdin
                 if exit_code != 0 and exit_code not in [
                     EXIT_CODE_FOR_LOOP_NEEDED,
+                    EXIT_CODE_WHILE_LOOP_NEEDED,
                     EXIT_CODE_IF_STATEMENT_NEEDED,
                     EXIT_CODE_HEREDOC_NEEDED,
                     EXIT_CODE_FUNCTION_DEF_NEEDED
