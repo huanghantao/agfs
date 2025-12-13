@@ -1,4 +1,4 @@
-# AGFS FUSE
+# AGFS FUSE [WIP]
 
 A FUSE filesystem implementation for mounting AGFS servers on Linux.
 
