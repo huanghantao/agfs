@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	agfs "github.com/c4pt0r/agfs/agfs-sdk/go"
+	log "github.com/sirupsen/logrus"
 )
 
 // handleType indicates whether a handle is remote (server-side) or local (client-side fallback)
@@ -64,7 +65,7 @@ func (hm *HandleManager) Open(path string, flags agfs.OpenFlag, mode uint32) (ui
 		// Check if error is because HandleFS is not supported
 		if errors.Is(err, agfs.ErrNotSupported) {
 			// Fall back to local handle management
-			fmt.Printf("DEBUG: HandleFS not supported for %s, using local handle\n", path)
+			log.Debugf("HandleFS not supported for %s, using local handle", path)
 			hm.handles[fuseHandle] = &handleInfo{
 				htype: handleTypeLocal,
 				path:  path,
@@ -73,11 +74,11 @@ func (hm *HandleManager) Open(path string, flags agfs.OpenFlag, mode uint32) (ui
 			}
 			return fuseHandle, nil
 		}
-		fmt.Printf("DEBUG: Failed to open handle for %s: %v\n", path, err)
+		log.Debugf("Failed to open handle for %s: %v", path, err)
 		return 0, fmt.Errorf("failed to open handle: %w", err)
 	}
 
-	fmt.Printf("DEBUG: Opened remote handle for %s (handle=%d)\n", path, agfsHandle)
+	log.Debugf("Opened remote handle for %s (handle=%d)", path, agfsHandle)
 
 	// Server supports HandleFS
 	hm.handles[fuseHandle] = &handleInfo{

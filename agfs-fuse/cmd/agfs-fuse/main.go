@@ -3,9 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/dongxuny/agfs-fuse/pkg/version"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	log "github.com/sirupsen/logrus"
 )
 
 func main() {
@@ -21,6 +23,7 @@ func main() {
 		mountpoint  = flag.String("mount", "", "Mount point directory")
 		cacheTTL    = flag.Duration("cache-ttl", 5*time.Second, "Cache TTL duration")
 		debug       = flag.Bool("debug", false, "Enable debug output")
+		logLevel    = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
 		allowOther  = flag.Bool("allow-other", false, "Allow other users to access the mount")
 		showVersion = flag.Bool("version", false, "Show version information")
 	)
@@ -43,6 +46,25 @@ func main() {
 		fmt.Printf("agfs-fuse %s\n", version.GetFullVersion())
 		os.Exit(0)
 	}
+
+	// Initialize logrus
+	level := log.InfoLevel
+	if *debug {
+		level = log.DebugLevel
+	} else if *logLevel != "" {
+		if parsedLevel, err := log.ParseLevel(*logLevel); err == nil {
+			level = parsedLevel
+		}
+	}
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp: true,
+		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
+			filename := filepath.Base(f.File)
+			return "", fmt.Sprintf(" | %s:%d | ", filename, f.Line)
+		},
+	})
+	log.SetReportCaller(true)
+	log.SetLevel(level)
 
 	// Check required arguments
 	if *serverURL == "" || *mountpoint == "" {
@@ -80,12 +102,12 @@ func main() {
 		log.Fatalf("Mount failed: %v", err)
 	}
 
-	fmt.Printf("AGFS mounted at %s\n", *mountpoint)
-	fmt.Printf("Server: %s\n", *serverURL)
-	fmt.Printf("Cache TTL: %v\n", *cacheTTL)
+	log.Infof("AGFS mounted at %s", *mountpoint)
+	log.Infof("Server: %s", *serverURL)
+	log.Infof("Cache TTL: %v", *cacheTTL)
 
-	if !*debug {
-		fmt.Println("Press Ctrl+C to unmount")
+	if level > log.DebugLevel {
+		log.Info("Press Ctrl+C to unmount")
 	}
 
 	// Handle graceful shutdown
@@ -94,21 +116,21 @@ func main() {
 
 	go func() {
 		<-sigChan
-		fmt.Println("\nUnmounting...")
+		log.Info("Unmounting...")
 
 		// Unmount
 		if err := server.Unmount(); err != nil {
-			log.Printf("Unmount failed: %v", err)
+			log.Errorf("Unmount failed: %v", err)
 		}
 
 		// Close filesystem
 		if err := root.Close(); err != nil {
-			log.Printf("Close filesystem failed: %v", err)
+			log.Errorf("Close filesystem failed: %v", err)
 		}
 	}()
 
 	// Wait for the filesystem to be unmounted
 	server.Wait()
 
-	fmt.Println("AGFS unmounted successfully")
+	log.Info("AGFS unmounted successfully")
 }
