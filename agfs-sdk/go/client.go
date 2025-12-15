@@ -660,7 +660,7 @@ func (c *Client) OpenHandle(path string, flags OpenFlag, mode uint32) (int64, er
 	query := url.Values{}
 	query.Set("path", path)
 	query.Set("flags", fmt.Sprintf("%d", flags))
-	query.Set("mode", fmt.Sprintf("%d", mode))
+	query.Set("mode", fmt.Sprintf("%o", mode))
 
 	resp, err := c.doRequest(http.MethodPost, "/handles/open", query, nil)
 	if err != nil {

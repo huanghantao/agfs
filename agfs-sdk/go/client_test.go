@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -135,6 +136,77 @@ func TestClient_OpenHandleNotSupported(t *testing.T) {
 	}
 	if err != ErrNotSupported {
 		t.Errorf("expected ErrNotSupported, got %v", err)
+	}
+}
+
+func TestClient_OpenHandleModeOctalFormat(t *testing.T) {
+	tests := []struct {
+		name         string
+		mode         uint32
+		expectedMode string // Expected octal string in query parameter
+	}{
+		{
+			name:         "mode 0644 (rw-r--r--)",
+			mode:         0644,
+			expectedMode: "644",
+		},
+		{
+			name:         "mode 0755 (rwxr-xr-x)",
+			mode:         0755,
+			expectedMode: "755",
+		},
+		{
+			name:         "mode 0100644 (regular file, rw-r--r--)",
+			mode:         0100644, // 33188 in decimal
+			expectedMode: "100644",
+		},
+		{
+			name:         "mode 0100755 (regular file, rwxr-xr-x)",
+			mode:         0100755, // 33261 in decimal
+			expectedMode: "100755",
+		},
+		{
+			name:         "mode 0600 (rw-------)",
+			mode:         0600,
+			expectedMode: "600",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/handles/open" {
+					// Verify the mode parameter is in octal format
+					modeStr := r.URL.Query().Get("mode")
+					if modeStr != tt.expectedMode {
+						t.Errorf("mode parameter mismatch: expected %q (octal), got %q", tt.expectedMode, modeStr)
+					}
+
+					// Verify the mode can be parsed as octal (like the server does)
+					if parsed, err := strconv.ParseUint(modeStr, 8, 32); err != nil {
+						t.Errorf("mode parameter %q cannot be parsed as octal: %v", modeStr, err)
+					} else if parsed != uint64(tt.mode) {
+						t.Errorf("parsed mode mismatch: expected %d, got %d", tt.mode, parsed)
+					}
+
+					// Return success response
+					w.WriteHeader(http.StatusOK)
+					json.NewEncoder(w).Encode(HandleResponse{HandleID: 123})
+					return
+				}
+				t.Errorf("unexpected request to %s", r.URL.Path)
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL)
+			handle, err := client.OpenHandle("/test/file.txt", 0, tt.mode)
+			if err != nil {
+				t.Errorf("OpenHandle failed: %v", err)
+			}
+			if handle != 123 {
+				t.Errorf("expected handle 123, got %d", handle)
+			}
+		})
 	}
 }
 
