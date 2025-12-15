@@ -61,6 +61,9 @@ class Process:
         try:
             # Execute the command
             self.exit_code = self.executor(self)
+        except KeyboardInterrupt:
+            # Let KeyboardInterrupt propagate for proper Ctrl-C handling
+            raise
         except ControlFlowException:
             # Let control flow exceptions (break, continue, return) propagate
             raise

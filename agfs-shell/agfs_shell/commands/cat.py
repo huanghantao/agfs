@@ -35,8 +35,8 @@ def cmd_cat(process: Process) -> int:
                     process.stdout.write(chunk)
                     process.stdout.flush()
             except KeyboardInterrupt:
-                process.stderr.write(b"\ncat: interrupted\n")
-                return 130
+                # Re-raise to allow proper signal propagation in script mode
+                raise
     else:
         # Read from files in streaming mode
         for filename in process.args:
@@ -50,8 +50,8 @@ def cmd_cat(process: Process) -> int:
                                 process.stdout.write(chunk)
                                 process.stdout.flush()
                     except KeyboardInterrupt:
-                        process.stderr.write(b"\ncat: interrupted\n")
-                        return 130
+                        # Re-raise to allow proper signal propagation in script mode
+                        raise
                 else:
                     # Fallback to local filesystem
                     with open(filename, 'rb') as f:

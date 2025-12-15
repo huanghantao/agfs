@@ -88,6 +88,9 @@ class StreamingPipeline:
         try:
             exit_code = process.execute()
             self.exit_codes[index] = exit_code
+        except KeyboardInterrupt:
+            # Let KeyboardInterrupt propagate for proper Ctrl-C handling
+            raise
         except ControlFlowException:
             # Let control flow exceptions propagate
             raise

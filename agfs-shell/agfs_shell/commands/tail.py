@@ -109,8 +109,8 @@ def cmd_tail(process: Process) -> int:
                                 process.stdout.write(chunk)
                                 process.stdout.flush()
                     except KeyboardInterrupt:
-                        process.stderr.write(b"\n")
-                        return 0
+                        # Re-raise to allow proper signal propagation in script mode
+                        raise
                     except Exception as e:
                         error_msg = str(e)
                         # Check if it's a streaming-related error
@@ -165,9 +165,8 @@ def cmd_tail(process: Process) -> int:
                                 process.stdout.flush()
                                 current_size = new_size
                     except KeyboardInterrupt:
-                        # Clean exit on Ctrl+C
-                        process.stderr.write(b"\n")
-                        return 0
+                        # Re-raise to allow proper signal propagation in script mode
+                        raise
             else:
                 # No filesystem - should not happen in normal usage
                 process.stderr.write(b"tail: filesystem not available\n")

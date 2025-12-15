@@ -1,4 +1,4 @@
-#!/usr/bin/env uv run agfs-shell
+#!/usr/bin/env agfs
 
 # Enqueue Task Script
 #

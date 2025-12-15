@@ -1,4 +1,4 @@
-#!/usr/bin/env uv run agfs-shell
+#!/usr/bin/env agfs
 
 # Task Queue Worker - Process tasks from QueueFS in a loop
 #

@@ -38,5 +38,6 @@ def cmd_sleep(process: Process) -> int:
         process.stderr.write(f"sleep: invalid time interval '{process.args[0]}'\n")
         return 1
     except KeyboardInterrupt:
-        process.stderr.write("\nsleep: interrupted\n")
-        return 130
+        # Re-raise KeyboardInterrupt to allow proper signal propagation
+        # This allows the script executor to handle Ctrl-C properly
+        raise

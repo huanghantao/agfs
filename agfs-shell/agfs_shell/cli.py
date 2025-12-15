@@ -171,6 +171,10 @@ def execute_script_file(shell, script_path, script_args=None):
             i += 1
 
         return exit_code
+    except KeyboardInterrupt:
+        # Ctrl-C during script execution - exit with code 130 (128 + SIGINT)
+        sys.stderr.write("\n")
+        return 130
     except SystemExit as e:
         # Handle exit command at top level
         return e.code if e.code is not None else 0
