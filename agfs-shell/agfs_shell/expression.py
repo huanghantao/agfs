@@ -818,16 +818,20 @@ class ExpressionExpander:
             get_variable=shell._get_variable
         )
 
+    # Placeholder for single-quoted content (Unicode private use area)
+    SINGLE_QUOTE_PLACEHOLDER_PREFIX = '\ue100'
+
     def expand(self, text: str) -> str:
         """
         Expand all expressions in text
 
         Expansion order:
+        0. Protect single-quoted content (no expansion inside single quotes)
         1. $'...' ANSI-C quoting (escape sequences)
-        2. Double-quote escape processing (backslash escapes)
-        3. Command substitution $(cmd) and `cmd`
-        4. Arithmetic $((expr))
-        5. Parameter expansion ${VAR}, $VAR
+        2. Command substitution $(cmd) and `cmd`
+        3. Arithmetic $((expr))
+        4. Parameter expansion ${VAR}, $VAR
+        5. Restore single-quoted content
 
         Args:
             text: Text containing expressions
@@ -835,6 +839,10 @@ class ExpressionExpander:
         Returns:
             Fully expanded text
         """
+        # Step 0: Protect single-quoted content from expansion
+        # In Bash, content inside '...' is literal (no expansion)
+        text, single_quoted_parts = self._protect_single_quoted(text)
+
         # Step 1: $'...' ANSI-C quoting with escape sequences
         text = EscapeHandler.expand_dollar_single_quotes(text)
 
@@ -847,7 +855,80 @@ class ExpressionExpander:
         # Step 4: Parameter expansion
         text = self._expand_parameters(text)
 
+        # Step 5: Restore single-quoted content (without the quotes)
+        text = self._restore_single_quoted(text, single_quoted_parts)
+
         return text
+
+    def _protect_single_quoted(self, text: str) -> Tuple[str, List[str]]:
+        """
+        Replace single-quoted sections with placeholders.
+
+        Returns:
+            Tuple of (text with placeholders, list of original contents)
+        """
+        result = []
+        single_quoted_parts = []
+        i = 0
+        in_double_quote = False
+
+        while i < len(text):
+            char = text[i]
+
+            # Track double quotes (single quotes inside double quotes are literal)
+            if char == '"' and (i == 0 or text[i-1] != '\\'):
+                in_double_quote = not in_double_quote
+                result.append(char)
+                i += 1
+                continue
+
+            # Check for single quote outside of double quotes
+            # Also skip $'...' which is ANSI-C quoting (handled separately)
+            if char == "'" and not in_double_quote:
+                # Check if this is $'...' (ANSI-C quoting)
+                if i > 0 and text[i-1] == '$':
+                    result.append(char)
+                    i += 1
+                    continue
+
+                # Found start of single-quoted string
+                i += 1  # Skip opening quote
+                content_start = i
+
+                # Find closing quote
+                while i < len(text) and text[i] != "'":
+                    i += 1
+
+                # Extract content (without quotes)
+                content = text[content_start:i]
+                single_quoted_parts.append(content)
+
+                # Replace with placeholder
+                placeholder_idx = len(single_quoted_parts) - 1
+                result.append(f'{self.SINGLE_QUOTE_PLACEHOLDER_PREFIX}{placeholder_idx:04d}')
+
+                if i < len(text):
+                    i += 1  # Skip closing quote
+            else:
+                result.append(char)
+                i += 1
+
+        return ''.join(result), single_quoted_parts
+
+    def _restore_single_quoted(self, text: str, parts: List[str]) -> str:
+        """
+        Restore single-quoted content from placeholders.
+        """
+        import re
+        pattern = re.escape(self.SINGLE_QUOTE_PLACEHOLDER_PREFIX) + r'(\d{4})'
+
+        def replace(match):
+            idx = int(match.group(1))
+            if idx < len(parts):
+                return parts[idx]
+            return match.group(0)
+
+        return re.sub(pattern, replace, text)
 
     def expand_variables_only(self, text: str) -> str:
         """
@@ -855,8 +936,14 @@ class ExpressionExpander:
 
         Useful for contexts where command substitution shouldn't happen.
         """
+        # Protect single-quoted content from expansion
+        text, single_quoted_parts = self._protect_single_quoted(text)
+
         text = self._expand_arithmetic(text)
         text = self._expand_parameters(text)
+
+        # Restore single-quoted content
+        text = self._restore_single_quoted(text, single_quoted_parts)
         return text
 
     def _expand_command_substitution(self, text: str) -> str:
@@ -896,7 +983,8 @@ class ExpressionExpander:
             char = text[i]
             tracker.process_char(char)
 
-            if not tracker.is_quoted() and text[i:i+2] == '$(':
+            # Check if command substitution is allowed in current quote context
+            if tracker.allows_command_substitution() and text[i:i+2] == '$(':
                 # Skip if this is $((
                 if i < len(text) - 2 and text[i:i+3] == '$((':
                     i += 1

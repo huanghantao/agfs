@@ -215,7 +215,8 @@ PATH=/local/data
 # Expansion
 echo $NAME              # Simple expansion
 echo ${NAME}            # Braced expansion (preferred)
-echo "Hello, $NAME!"    # In double quotes
+echo "Hello, $NAME!"    # In double quotes (expanded)
+echo 'Hello, $NAME!'    # In single quotes (literal, no expansion)
 
 # Special variables
 echo $?                 # Exit code of last command
@@ -229,6 +230,13 @@ export DATABASE_URL="postgres://localhost/mydb"
 env | grep DATABASE
 unset DATABASE_URL
 ```
+
+**Quote Behavior:**
+| Quote Type | Variable Expansion | Command Substitution | Glob Expansion |
+|------------|-------------------|---------------------|----------------|
+| `"..."` (double) | Yes | Yes | No |
+| `'...'` (single) | No | No | No |
+| No quotes | Yes | Yes | Yes |
 
 ### Arithmetic Expansion
 
@@ -266,9 +274,23 @@ today=$(date "+%Y-%m-%d")
 # Using backticks (also works)
 files=`ls /local/tmp`
 
-# In strings
+# In double-quoted strings (expansion happens)
+echo "Current time: $(date)"
+echo "AGFS Shell initialized at $(date)"
 echo "There are $(ls /local/tmp | wc -l) files in the directory"
+
+# In single-quoted strings (NO expansion - literal text)
+echo 'This is literal: $(date)'    # Output: This is literal: $(date)
+echo 'Price: $100'                 # Output: Price: $100
+
+# Nested command substitution
+echo "Files: $(ls $(pwd))"
 ```
+
+**Quote Behavior (Bash-compatible):**
+- **Double quotes `"..."`**: Variables and command substitution ARE expanded
+- **Single quotes `'...'`**: Everything is literal, NO expansion
+- **No quotes**: Variables and command substitution ARE expanded
 
 ### Glob Patterns
 

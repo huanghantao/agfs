@@ -254,6 +254,39 @@ class QuoteTracker:
         """Check if currently inside any type of quotes"""
         return self.in_single_quote or self.in_double_quote
 
+    def allows_variable_expansion(self) -> bool:
+        """
+        Check if variable expansion ($VAR) is allowed in current context.
+
+        Bash behavior:
+        - Single quotes: NO expansion (literal text)
+        - Double quotes: YES expansion
+        - Unquoted: YES expansion
+        """
+        return not self.in_single_quote
+
+    def allows_command_substitution(self) -> bool:
+        """
+        Check if command substitution $(cmd) is allowed in current context.
+
+        Bash behavior:
+        - Single quotes: NO substitution (literal text)
+        - Double quotes: YES substitution
+        - Unquoted: YES substitution
+        """
+        return not self.in_single_quote
+
+    def allows_glob_expansion(self) -> bool:
+        """
+        Check if glob/wildcard expansion (*, ?) is allowed in current context.
+
+        Bash behavior:
+        - Single quotes: NO expansion (literal text)
+        - Double quotes: NO expansion (literal text)
+        - Unquoted: YES expansion
+        """
+        return not self.in_single_quote and not self.in_double_quote
+
     def reset(self):
         """Reset quote tracking state"""
         self.in_single_quote = False
