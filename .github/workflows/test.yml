@@ -1,0 +1,234 @@
+name: Tests
+
+on:
+  push:
+    branches: [ master, ci/github-actions ]
+  pull_request:
+    branches: [ master, ci/github-actions ]
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  # agfs-fuse 测试（包含依赖的 server 和 sdk）
+  test:
+    name: Test agfs-fuse
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.1'
+          cache-dependency-path: |
+            agfs-server/go.sum
+            agfs-fuse/go.sum
+            agfs-sdk/go/go.mod
+
+      - name: 安装 FUSE 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3 libfuse3-dev
+          
+          # 验证 FUSE 安装
+          fusermount3 --version || fusermount --version
+          
+          # 加载 FUSE 内核模块
+          sudo modprobe fuse || echo "FUSE module already loaded"
+          
+          # 检查 FUSE 设备并设置权限
+          ls -la /dev/fuse
+          sudo chmod 666 /dev/fuse || true
+
+      # ==================== 依赖模块测试 ====================
+
+      - name: 测试 agfs-sdk (Go)
+        working-directory: agfs-sdk/go
+        run: |
+          echo "========== Testing agfs-sdk (Go) =========="
+          go mod download
+          go mod verify
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: 测试 agfs-server
+        working-directory: agfs-server
+        run: |
+          echo "========== Testing agfs-server =========="
+          go mod download
+          go mod verify
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out
+
+      - name: 构建 agfs-server
+        working-directory: agfs-server
+        run: |
+          make build
+          ls -lh build/
+          file build/agfs-server
+
+      # ==================== agfs-fuse 测试 ====================
+
+      - name: 测试 agfs-fuse
+        working-directory: agfs-fuse
+        run: |
+          echo "========== Testing agfs-fuse =========="
+          go mod download
+          go mod verify
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out
+
+      - name: 构建 agfs-fuse
+        working-directory: agfs-fuse
+        run: |
+          make build
+          ls -lh build/
+          file build/agfs-fuse
+          ./build/agfs-fuse --version || echo "No version flag available"
+
+      # ==================== 集成测试 ====================
+
+      - name: 集成测试 - 启动 agfs-server
+        run: |
+          echo "========== Integration Test =========="
+          
+          # 创建配置文件
+          cat > /tmp/agfs-config.yaml << 'EOF'
+          server:
+            port: 8080
+            host: localhost
+          
+          plugins:
+            - name: memfs
+              type: builtin
+              enabled: true
+            
+            - name: kvfs
+              type: builtin
+              enabled: true
+          EOF
+          
+          # 启动服务器
+          ./agfs-server/build/agfs-server --config /tmp/agfs-config.yaml &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+          
+          # 等待服务器启动
+          echo "Waiting for server to start..."
+          sleep 5
+          
+          # 验证服务器运行
+          curl -f http://localhost:8080/health || curl -f http://localhost:8080/ || echo "Server health check failed"
+
+      - name: 集成测试 - 挂载并测试 agfs-fuse
+        timeout-minutes: 3
+        run: |
+          # 创建挂载点
+          mkdir -p /tmp/agfs-mount
+          
+          # 在后台启动 agfs-fuse
+          ./agfs-fuse/build/agfs-fuse --agfs-server-url http://localhost:8080 --mount /tmp/agfs-mount --debug &
+          FUSE_PID=$!
+          echo "FUSE_PID=$FUSE_PID" >> $GITHUB_ENV
+          
+          # 等待挂载完成
+          echo "Waiting for FUSE mount..."
+          sleep 3
+          
+          # 验证挂载
+          if mountpoint -q /tmp/agfs-mount; then
+            echo "✓ FUSE mount successful"
+          else
+            echo "✗ FUSE mount failed"
+            exit 1
+          fi
+          
+          # 测试文件操作
+          echo "Testing file operations..."
+          ls -la /tmp/agfs-mount/ || true
+          
+          # 测试写入
+          echo "test content" > /tmp/agfs-mount/memfs/test.txt || echo "Write not supported or failed"
+          
+          # 测试读取
+          if [ -f /tmp/agfs-mount/memfs/test.txt ]; then
+            cat /tmp/agfs-mount/memfs/test.txt || true
+          fi
+          
+          echo "✓ Integration test completed"
+
+      - name: 清理
+        if: always()
+        run: |
+          # 卸载 FUSE
+          if mountpoint -q /tmp/agfs-mount 2>/dev/null; then
+            fusermount -u /tmp/agfs-mount || fusermount3 -u /tmp/agfs-mount || sudo umount /tmp/agfs-mount || true
+          fi
+          
+          # 停止进程
+          if [ -n "$FUSE_PID" ]; then
+            kill $FUSE_PID 2>/dev/null || true
+          fi
+          
+          if [ -n "$SERVER_PID" ]; then
+            kill $SERVER_PID 2>/dev/null || true
+          fi
+          
+          # 清理文件
+          rm -rf /tmp/agfs-mount /tmp/agfs-config.yaml
+
+      # ==================== 上传结果 ====================
+
+      - name: 上传测试覆盖率
+        uses: codecov/codecov-action@v4
+        with:
+          files: |
+            ./agfs-server/coverage.out
+            ./agfs-fuse/coverage.out
+            ./agfs-sdk/go/coverage.out
+          flags: agfs-fuse
+          fail_ci_if_error: false
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: agfs-fuse-linux-amd64
+          path: |
+            agfs-server/build/agfs-server
+            agfs-fuse/build/agfs-fuse
+          retention-days: 7
+
+  # Lint 检查
+  lint:
+    name: Lint Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.1'
+
+      - name: Lint agfs-fuse
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          working-directory: agfs-fuse
+          args: --timeout=5m
+
+      - name: Lint agfs-server
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          working-directory: agfs-server
+          args: --timeout=5m
+
+      - name: Lint agfs-sdk (Go)
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          working-directory: agfs-sdk/go
+          args: --timeout=5m
