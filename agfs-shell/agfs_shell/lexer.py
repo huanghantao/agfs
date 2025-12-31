@@ -241,7 +241,9 @@ class QuoteTracker:
             self.escape_next = False
             return
 
-        if char == '\\':
+        # Backslash only escapes outside single quotes
+        # In single quotes, backslash is a literal character (Bash behavior)
+        if char == '\\' and not self.in_single_quote:
             self.escape_next = True
             return
 

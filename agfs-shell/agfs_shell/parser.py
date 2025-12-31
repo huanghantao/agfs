@@ -42,14 +42,16 @@ class CommandParser:
         while i < len(text):
             char = text[i]
 
-            # Handle escape sequences
+            # Handle escape sequences (only outside single quotes)
             if escape_next:
                 current_part.append(char)
                 escape_next = False
                 i += 1
                 continue
 
-            if char == '\\':
+            # Backslash escaping only works outside single quotes
+            # In single quotes, backslash is a literal character
+            if char == '\\' and not in_single_quote:
                 current_part.append(char)
                 escape_next = True
                 i += 1
@@ -107,14 +109,16 @@ class CommandParser:
         while i < len(command_line):
             char = command_line[i]
 
-            # Handle escape sequences
+            # Handle escape sequences (only outside single quotes)
             if escape_next:
                 result.append(char)
                 escape_next = False
                 i += 1
                 continue
 
-            if char == '\\':
+            # Backslash escaping only works outside single quotes
+            # In single quotes, backslash is a literal character
+            if char == '\\' and not in_single_quote:
                 result.append(char)
                 escape_next = True
                 i += 1

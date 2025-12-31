@@ -1763,23 +1763,26 @@ class Shell:
                     self._set_variable(var_name, var_value)
                     return 0
 
-        # Expand variables in command line
-        command_line = self._expand_variables(command_line)
-
-        # Expand aliases (only for the first word of the command)
-        command_line = self._expand_alias(command_line)
-
-        # Handle && and || operators (conditional execution)
+        # Handle && and || operators (conditional execution) BEFORE variable expansion
         # Split by && and || while preserving which operator was used
+        # Must respect quotes - operators inside quotes are literal text
+        # This must happen BEFORE _expand_variables because that removes quotes
         if '&&' in command_line or '||' in command_line:
             # Parse conditional chains: cmd1 && cmd2 || cmd3
             # We need to respect operator precedence and short-circuit evaluation
+            from .lexer import QuoteTracker
             parts = []
             operators = []
             current = []
             i = 0
+            tracker = QuoteTracker()
             while i < len(command_line):
-                if i < len(command_line) - 1:
+                char = command_line[i]
+                # Update quote tracking state
+                tracker.process_char(char)
+
+                # Only treat && and || as operators when not inside quotes
+                if not tracker.is_quoted() and i < len(command_line) - 1:
                     two_char = command_line[i:i+2]
                     if two_char == '&&' or two_char == '||':
                         parts.append(''.join(current).strip())
@@ -1787,13 +1790,14 @@ class Shell:
                         current = []
                         i += 2
                         continue
-                current.append(command_line[i])
+                current.append(char)
                 i += 1
             if current:
                 parts.append(''.join(current).strip())
 
-            # Execute with short-circuit evaluation
-            if parts:
+            # Execute with short-circuit evaluation only if we found actual operators
+            # If operators is empty, the && or || were inside quotes - continue normal processing
+            if operators:
                 last_exit_code = self.execute(parts[0], stdin_data=stdin_data, heredoc_data=heredoc_data)
                 for i, op in enumerate(operators):
                     if op == '&&':
@@ -1809,6 +1813,12 @@ class Shell:
                             # Previous succeeded, set exit code to 0 and don't execute next
                             last_exit_code = 0
                 return last_exit_code
+
+        # Expand variables in command line (after && and || check to preserve quote handling)
+        command_line = self._expand_variables(command_line)
+
+        # Expand aliases (only for the first word of the command)
+        command_line = self._expand_alias(command_line)
 
         # Parse the command line with redirections
         commands, redirections = self.parser.parse_command_line(command_line)
