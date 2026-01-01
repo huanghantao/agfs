@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/c4pt0r/agfs/master/install.sh | sh
 Or via Docker:
 
 ```bash
-docker pull c4pt0r/agfs-server:latest
+docker pull c4pt0r/agfs:latest
 ```
 
 Connect using agfs-shell:
@@ -212,3 +212,4 @@ See [task_loop.py](./agfs-mcp/demos/task_loop.py) for a complete example.
 - [agfs-server](./agfs-server/README.md) - Server configuration and plugin development
 - [agfs-shell](./agfs-shell/README.md) - Interactive shell client
 - [agfs-fuse](./agfs-fuse/README.md) - FUSE filesystem mount (Linux)
+
