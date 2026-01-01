@@ -172,6 +172,7 @@ jobs:
           file: ./agfs-server/Dockerfile
           push: true
           tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/agfs:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/agfs:nightly
             ${{ secrets.DOCKERHUB_USERNAME }}/agfs:nightly-${{ steps.version.outputs.date }}
             ${{ secrets.DOCKERHUB_USERNAME }}/agfs:nightly-${{ steps.version.outputs.short_sha }}
