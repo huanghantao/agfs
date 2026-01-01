@@ -2,6 +2,7 @@
 
 import sys
 import os
+import readline
 from typing import Optional, List
 from rich.console import Console
 from .parser import CommandParser
@@ -48,7 +49,6 @@ class Shell:
         self.env['?'] = '0'  # Last command exit code
 
         # Set default history file location
-        import os
         home = os.path.expanduser("~")
         self.env['HISTFILE'] = os.path.join(home, ".agfs_shell_history")
 
@@ -809,7 +809,6 @@ class Shell:
             List of matching file paths
         """
         import fnmatch
-        import os
 
         # Resolve the pattern to absolute path
         if pattern.startswith('/'):
@@ -2154,10 +2153,6 @@ class Shell:
         """Run interactive REPL"""
         # Set interactive mode flag
         self.interactive = True
-        self.console.print("""     __  __ __ 
- /\\ / _ |_ (_  
-/--\\\\__)|  __) 
-        """)
         self.console.print(f"[bold cyan]agfs-shell[/bold cyan] v{__version__}", highlight=False)
 
         # Check server connection - exit if failed
@@ -2173,8 +2168,6 @@ class Shell:
         # Setup tab completion and history
         history_loaded = False
         try:
-            import readline
-            import os
             from .completer import ShellCompleter
 
             completer = ShellCompleter(self.filesystem)
@@ -2524,8 +2517,6 @@ class Shell:
         # Use current value of HISTFILE variable (may have been changed during session)
         if 'HISTFILE' in self.env:
             try:
-                import readline
-                import os
                 history_file = os.path.expanduser(self.env['HISTFILE'])
                 readline.write_history_file(history_file)
             except Exception as e:
