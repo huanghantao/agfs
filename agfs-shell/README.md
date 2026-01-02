@@ -109,12 +109,25 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 **AGFS Server must be running!**
 
 ```bash
-# Option 1: Run from source
+# Option 1: Use Docker (Recommended)
+# Pull the image
+docker pull c4pt0r/agfs:latest
+
+# Run the server with port mapping
+docker run -d -p 8080:8080 --name agfs-server c4pt0r/agfs:latest
+
+# With data persistence (mount /data directory)
+docker run -d -p 8080:8080 -v $(pwd)/data:/data --name agfs-server c4pt0r/agfs:latest
+
+# With custom configuration
+docker run -d -p 8080:8080 -v $(pwd)/config.yaml:/config.yaml --name agfs-server c4pt0r/agfs:latest
+
+# Verify server is running
+curl http://localhost:8080/api/v1/health
+
+# Option 2: Run from source
 cd agfs-server
 go run main.go
-
-# Option 2: Use Docker
-docker run -p 8080:8080 c4pt0r/agfs-server:latest
 ```
 
 ## Installation
