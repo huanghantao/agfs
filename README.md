@@ -39,6 +39,18 @@ Or via Docker:
 
 ```bash
 docker pull c4pt0r/agfs:latest
+
+# Run the server (HTTP API only)
+docker run -p 8080:8080 -e SKIP_FUSE_MOUNT=true c4pt0r/agfs:latest
+
+# On Linux, you can enable FUSE mounting with additional privileges
+docker run -p 8080:8080 \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  c4pt0r/agfs:latest
+
+# Note: FUSE mounting in Docker is not supported on macOS
 ```
 
 Connect using agfs-shell:

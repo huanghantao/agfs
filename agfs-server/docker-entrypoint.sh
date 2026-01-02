@@ -30,9 +30,24 @@ while [ $retry_count -lt $max_retries ]; do
     sleep 1
 done
 
+# Check if FUSE mount should be skipped
+if [ "$SKIP_FUSE_MOUNT" = "true" ]; then
+    echo "FUSE mounting skipped (SKIP_FUSE_MOUNT=true)"
+    echo "AGFS Server is running on port 8080"
+    echo "Access via HTTP API or agfs-shell"
+    wait $SERVER_PID
+    exit 0
+fi
+
 # Create mount point if it doesn't exist
 mkdir -p "$AGFS_MOUNT_POINT"
 
 echo "Mounting AGFS to $AGFS_MOUNT_POINT..."
-# Start agfs-fuse in foreground
-exec agfs-fuse --agfs-server-url "$AGFS_SERVER_URL" --mount "$AGFS_MOUNT_POINT" --allow-other
+# Start agfs-fuse in foreground, but if it fails, keep server running
+if ! agfs-fuse --agfs-server-url "$AGFS_SERVER_URL" --mount "$AGFS_MOUNT_POINT" --allow-other; then
+    echo "WARNING: FUSE mounting failed, but AGFS Server is still running"
+    echo "You can still access AGFS via HTTP API or agfs-shell"
+    echo "To skip this warning, set SKIP_FUSE_MOUNT=true"
+    wait $SERVER_PID
+    exit 0
+fi
