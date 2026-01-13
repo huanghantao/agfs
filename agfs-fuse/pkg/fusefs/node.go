@@ -8,6 +8,7 @@ import (
 	agfs "github.com/c4pt0r/agfs/agfs-sdk/go"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	log "github.com/sirupsen/logrus"
 )
 
 // AGFSNode represents a file or directory node
@@ -250,11 +251,16 @@ func (n *AGFSNode) Create(ctx context.Context, name string, flags uint32, mode u
 	path := n.getPath()
 	childPath := filepath.Join(path, name)
 
+	log.Debugf("[node] Create called: path=%s, name=%s, childPath=%s", path, name, childPath)
+
 	// Create the file
 	err := n.root.client.Create(childPath)
 	if err != nil {
+		log.Errorf("[node] Create failed for %s: %v", childPath, err)
 		return nil, nil, 0, syscall.EIO
 	}
+
+	log.Debugf("[node] Create succeeded, opening handle for %s", childPath)
 
 	// Invalidate caches
 	n.root.invalidateCache(childPath)
@@ -263,12 +269,16 @@ func (n *AGFSNode) Create(ctx context.Context, name string, flags uint32, mode u
 	openFlags := convertOpenFlags(flags)
 	fuseHandle, err := n.root.handles.Open(childPath, openFlags, mode)
 	if err != nil {
+		log.Errorf("[node] Open handle failed for %s: %v", childPath, err)
 		return nil, nil, 0, syscall.EIO
 	}
+
+	log.Debugf("[node] Handle opened: %d for %s", fuseHandle, childPath)
 
 	// Fetch file info
 	info, err := n.root.client.Stat(childPath)
 	if err != nil {
+		log.Errorf("[node] Stat failed for %s: %v", childPath, err)
 		n.root.handles.Close(fuseHandle)
 		return nil, nil, 0, syscall.EIO
 	}

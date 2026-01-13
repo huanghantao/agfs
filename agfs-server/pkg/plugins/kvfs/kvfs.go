@@ -423,6 +423,12 @@ func (kvfs *kvFS) Chmod(path string, mode uint32) error {
 	return fmt.Errorf("cannot change permissions in kvfs service")
 }
 
+// Truncate is a no-op for kvfs since it's a key-value store
+// This allows shell redirections to work properly
+func (kvfs *kvFS) Truncate(path string, size int64) error {
+	return nil
+}
+
 func (kvfs *kvFS) Open(path string) (io.ReadCloser, error) {
 	data, err := kvfs.Read(path, 0, -1)
 	if err != nil {

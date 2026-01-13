@@ -884,6 +884,14 @@ func (qfs *queueFS) Chmod(path string, mode uint32) error {
 	return fmt.Errorf("cannot change permissions in queuefs service")
 }
 
+// Truncate is a no-op for queuefs since control files are virtual and don't have traditional file sizes
+// This allows shell redirections (which attempt to truncate before writing) to work properly
+func (qfs *queueFS) Truncate(path string, size int64) error {
+	// Silently succeed - truncate doesn't make sense for queue control files
+	// but we allow it to support common shell operations like `echo "data" > /queuefs/queue/enqueue`
+	return nil
+}
+
 func (qfs *queueFS) Open(path string) (io.ReadCloser, error) {
 	data, err := qfs.Read(path, 0, -1)
 	if err != nil {
@@ -1013,6 +1021,7 @@ type queueFileHandle struct {
 	// For dequeue/peek: cached message data (read once, return from cache)
 	readBuffer []byte
 	readDone   bool
+	readPos    int64 // Current position for sequential Read() calls
 
 	mu sync.Mutex
 }
@@ -1113,7 +1122,44 @@ func (h *queueFileHandle) Flags() filesystem.OpenFlag {
 }
 
 func (h *queueFileHandle) Read(buf []byte) (int, error) {
-	return h.ReadAt(buf, 0)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// For dequeue/peek: fetch data once and cache it
+	if !h.readDone {
+		var data []byte
+		var err error
+
+		switch h.operation {
+		case "dequeue":
+			data, err = h.qfs.dequeue(h.queueName)
+		case "peek":
+			data, err = h.qfs.peek(h.queueName)
+		case "size":
+			data, err = h.qfs.size(h.queueName)
+		case "enqueue", "clear":
+			// These are write-only operations
+			return 0, io.EOF
+		default:
+			return 0, fmt.Errorf("unsupported read operation: %s", h.operation)
+		}
+
+		if err != nil {
+			return 0, err
+		}
+
+		h.readBuffer = data
+		h.readDone = true
+	}
+
+	// Return from cache, tracking position for sequential reads
+	if h.readPos >= int64(len(h.readBuffer)) {
+		return 0, io.EOF
+	}
+
+	n := copy(buf, h.readBuffer[h.readPos:])
+	h.readPos += int64(n)
+	return n, nil
 }
 
 func (h *queueFileHandle) ReadAt(buf []byte, offset int64) (int, error) {

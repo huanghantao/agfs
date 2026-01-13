@@ -359,6 +359,11 @@ func (d *gptDriver) Chmod(path string, mode uint32) error {
 	return d.baseFS.Chmod(path, mode)
 }
 
+// Truncate delegates to the underlying filesystem
+func (d *gptDriver) Truncate(path string, size int64) error {
+	return d.baseFS.Truncate(path, size)
+}
+
 func (d *gptDriver) Open(path string) (io.ReadCloser, error) {
 	return d.baseFS.Open(path)
 }

@@ -849,8 +849,9 @@ def cmd_pwd(process: Process) -> int:
 
     Usage: pwd
     """
-    # Get cwd from process metadata if available
-    cwd = getattr(process, 'cwd', '/')
+    # Use virtual_cwd for display (shows path relative to chroot)
+    # Falls back to cwd if virtual_cwd is not set
+    cwd = getattr(process, 'virtual_cwd', None) or getattr(process, 'cwd', '/')
     process.stdout.write(f"{cwd}\n".encode('utf-8'))
     return 0
 
@@ -3654,6 +3655,88 @@ def cmd_return(process: Process) -> int:
     return EXIT_CODE_RETURN
 
 
+@command()
+def cmd_jobs(process: Process) -> int:
+    """
+    List background jobs
+
+    Usage: jobs [-l]
+    Options:
+      -l  Long format (include thread ID)
+
+    Examples:
+      jobs       # List all background jobs
+      jobs -l    # List jobs with thread IDs
+    """
+    show_pid = '-l' in process.args
+    shell = process.shell
+
+    if not shell:
+        process.stderr.write("jobs: shell instance not available\n")
+        return 1
+
+    jobs = shell.job_manager.get_all_jobs()
+
+    if not jobs:
+        return 0
+
+    for job in sorted(jobs, key=lambda j: j.job_id):
+        status = job.state.value
+
+        if show_pid and job.thread:
+            pid = job.thread.ident
+            line = f"[{job.job_id}] {pid} {status:12s} {job.command}\n"
+        else:
+            line = f"[{job.job_id}] {status:12s} {job.command}\n"
+
+        process.stdout.write(line)
+
+    return 0
+
+
+@command()
+def cmd_wait(process: Process) -> int:
+    """
+    Wait for background jobs to complete
+
+    Usage:
+      wait          # Wait for all jobs
+      wait <job_id> # Wait for specific job
+
+    Returns:
+      Exit code of waited job, or 0 if waiting for all jobs
+
+    Examples:
+      wait       # Wait for all background jobs to complete
+      wait 1     # Wait for job [1] to complete
+    """
+    shell = process.shell
+
+    if not shell:
+        process.stderr.write("wait: shell instance not available\n")
+        return 1
+
+    if not process.args:
+        # Wait for all jobs
+        shell.job_manager.wait_for_all()
+        return 0
+
+    # Wait for specific job
+    try:
+        job_id = int(process.args[0])
+    except ValueError:
+        process.stderr.write(f"wait: {process.args[0]}: invalid job id\n")
+        return 1
+
+    exit_code = shell.job_manager.wait_for_job(job_id)
+
+    if exit_code is None:
+        process.stderr.write(f"wait: {job_id}: no such job\n")
+        return 127
+
+    return exit_code
+
+
 # Registry of built-in commands (NOT YET MIGRATED)
 # These commands are still in this file and haven't been moved to the commands/ directory
 _OLD_BUILTINS = {
@@ -3696,6 +3779,8 @@ _OLD_BUILTINS = {
     'return': cmd_return,
     '?': cmd_help,
     'help': cmd_help,
+    'jobs': cmd_jobs,
+    'wait': cmd_wait,
 }
 
 # Load all commands from the new commands/ directory

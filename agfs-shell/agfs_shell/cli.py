@@ -85,6 +85,37 @@ def execute_script_file(shell, script_path, script_args=None):
         return 1
 
 
+def parse_env_vars(env_args):
+    """Parse environment variables from --env arguments.
+
+    Supports both single KEY=VALUE and bulk format (multiple lines).
+
+    Args:
+        env_args: List of --env argument values
+
+    Returns:
+        Dict of environment variables
+    """
+    env_dict = {}
+    if not env_args:
+        return env_dict
+
+    for arg in env_args:
+        # Split by newlines to handle bulk format (e.g., from $(env))
+        lines = arg.split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Parse KEY=VALUE format
+            if '=' in line:
+                key, _, value = line.partition('=')
+                if key:  # Only add if key is non-empty
+                    env_dict[key] = value
+
+    return env_dict
+
+
 def main():
     """Main entry point for the shell"""
     # Parse command line arguments
@@ -119,6 +150,19 @@ def main():
                         type=int,
                         default=3000,
                         help='Web app port (default: 3000)')
+    parser.add_argument('--env', '-e',
+                        dest='env_vars',
+                        action='append',
+                        metavar='KEY=VALUE',
+                        help='Set environment variable(s). Single: --env KEY=VALUE, Bulk: --env "$(env)"')
+    parser.add_argument('--initrc',
+                        dest='initrc',
+                        metavar='PATH',
+                        help='Custom initrc script path (skips default initrc scripts)')
+    parser.add_argument('--skip-initrc',
+                        dest='skip_initrc',
+                        action='store_true',
+                        help='Skip all initrc scripts')
     parser.add_argument('script', nargs='?', help='Script file to execute')
     parser.add_argument('args', nargs='*', help='Arguments to script (or command if no script)')
 
@@ -138,8 +182,11 @@ def main():
     # Create configuration
     config = Config.from_args(server_url=args.agfs_api_url, timeout=args.timeout)
 
+    # Parse environment variables from --env arguments
+    initial_env = parse_env_vars(args.env_vars)
+
     # Initialize shell with configuration
-    shell = Shell(server_url=config.server_url, timeout=config.timeout)
+    shell = Shell(server_url=config.server_url, timeout=config.timeout, initial_env=initial_env)
 
     # Check if webapp mode is requested
     if args.webapp:
@@ -156,9 +203,28 @@ def main():
             sys.exit(1)
         return
 
-    # Execute initrc scripts from AGFS filesystem
-    # These scripts can set up environment, define functions, aliases, etc.
-    execute_initrc_scripts(shell)
+    # Execute initrc scripts based on arguments
+    # --skip-initrc: skip all initrc scripts
+    # --initrc PATH: execute custom initrc (skips default scripts)
+    # default: execute default initrc scripts from AGFS filesystem
+    if not args.skip_initrc:
+        if args.initrc:
+            # Execute custom initrc script
+            if os.path.isfile(args.initrc):
+                # Local file
+                result = execute_script_file(shell, args.initrc)
+                if result != 0:
+                    sys.stderr.write(f"agfs-shell: warning: {args.initrc} returned exit code {result}\n")
+            else:
+                # Assume AGFS path
+                result = execute_agfs_script(shell, args.initrc, silent=False)
+                if result is None:
+                    sys.stderr.write(f"agfs-shell: {args.initrc}: No such file\n")
+                elif result != 0:
+                    sys.stderr.write(f"agfs-shell: warning: {args.initrc} returned exit code {result}\n")
+        else:
+            # Execute default initrc scripts from AGFS filesystem
+            execute_initrc_scripts(shell)
 
     # Determine mode of execution
     # Priority: -c flag > script file > command args > interactive

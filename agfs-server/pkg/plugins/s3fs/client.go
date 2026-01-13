@@ -17,12 +17,19 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const (
+	// PrefixIsolationDelimiter is used to wrap prefixes in strict isolation mode
+	// This ensures that nested prefixes like "team1" and "team1/test" are completely isolated
+	PrefixIsolationDelimiter = "__PREFIX__"
+)
+
 // S3Client wraps AWS S3 client with helper methods
 type S3Client struct {
-	client *s3.Client
-	bucket string
-	region string // AWS region
-	prefix string // Optional prefix for all keys
+	client    *s3.Client
+	bucket    string
+	region    string // AWS region
+	prefix    string // Effective prefix with isolation wrapping applied
+	rawPrefix string // Original user-specified prefix (for display purposes)
 }
 
 // S3Config holds S3 client configuration
@@ -32,7 +39,7 @@ type S3Config struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	Endpoint        string // Optional custom endpoint (for S3-compatible services)
-	Prefix          string // Optional prefix for all keys
+	Prefix          string // Optional prefix for all keys (will be wrapped for isolation)
 	DisableSSL      bool   // For testing with local S3
 	UsePathStyle    bool   // Use path-style requests (required for MinIO and some S3-compatible services)
 }
@@ -100,13 +107,23 @@ func NewS3Client(cfg S3Config) (*S3Client, error) {
 	log.Infof("[s3fs] Connected to S3 bucket: %s (region: %s)", cfg.Bucket, cfg.Region)
 
 	// Normalize prefix: remove leading and trailing slashes
-	prefix := strings.Trim(cfg.Prefix, "/")
+	rawPrefix := strings.Trim(cfg.Prefix, "/")
+	prefix := rawPrefix
+
+	// Always apply strict prefix isolation to prevent nested prefix conflicts
+	// Example: "team1" becomes "__PREFIX__team1__"
+	// This ensures "team1" and "team1/test" are completely isolated
+	if rawPrefix != "" {
+		prefix = PrefixIsolationDelimiter + rawPrefix + "__"
+		log.Infof("[s3fs] Prefix isolation applied. User prefix: %s, Effective prefix: %s", rawPrefix, prefix)
+	}
 
 	return &S3Client{
-		client: client,
-		bucket: cfg.Bucket,
-		region: cfg.Region,
-		prefix: prefix,
+		client:    client,
+		bucket:    cfg.Bucket,
+		region:    cfg.Region,
+		prefix:    prefix,
+		rawPrefix: rawPrefix,
 	}, nil
 }
 
@@ -124,6 +141,25 @@ func (c *S3Client) buildKey(path string) string {
 	}
 
 	return c.prefix + "/" + path
+}
+
+// isWithinPrefixBoundary checks if a key is strictly within this client's prefix namespace
+// This prevents conflicts when one prefix is a sub-path of another (e.g., "team1" vs "team1/test")
+func (c *S3Client) isWithinPrefixBoundary(key string) bool {
+	if c.prefix == "" {
+		return true
+	}
+
+	// Expected prefix for all keys in this namespace
+	expectedPrefix := c.prefix + "/"
+
+	// Key must start with our prefix
+	if !strings.HasPrefix(key, expectedPrefix) {
+		// Special case: the key might be exactly the prefix itself (directory marker)
+		return key == c.prefix || key == c.prefix+"/"
+	}
+
+	return true
 }
 
 // GetObject retrieves an object from S3

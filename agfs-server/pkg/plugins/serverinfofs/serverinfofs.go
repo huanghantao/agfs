@@ -384,6 +384,12 @@ func (fs *serverInfoFS) Chmod(path string, mode uint32) error {
 	return fmt.Errorf("operation not permitted: serverinfofs is read-only")
 }
 
+// Truncate is a no-op for serverinfofs
+// This allows shell redirections to work properly
+func (fs *serverInfoFS) Truncate(path string, size int64) error {
+	return nil
+}
+
 func (fs *serverInfoFS) Open(path string) (io.ReadCloser, error) {
 	data, err := fs.Read(path, 0, -1)
 	if err != nil {

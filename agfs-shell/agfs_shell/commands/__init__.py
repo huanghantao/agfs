@@ -55,29 +55,58 @@ def load_all_commands():
     This function imports all command modules from this package,
     which causes their @register_command decorators to execute
     and populate the _COMMANDS registry.
-    """
-    # Import all command modules here
-    # Each import will execute the @register_command decorator
-    # and add the command to the registry
 
-    # This will be populated as we migrate commands
-    # For now, we'll import them dynamically
+    Also loads user plugins from:
+    - ~/.agfs/plugins/
+    - Directories specified in AGFS_PLUGIN_PATH (colon-separated)
+    """
     import importlib
+    import importlib.util
     import pkgutil
     import os
+    import sys
 
-    # Get the directory containing this __init__.py
+    # 1. Load built-in commands
     package_dir = os.path.dirname(__file__)
 
-    # Iterate through all .py files in the commands directory
     for _, module_name, _ in pkgutil.iter_modules([package_dir]):
         if module_name != 'base':  # Skip base.py as it's not a command
             try:
                 importlib.import_module(f'.{module_name}', package=__name__)
             except Exception as e:
-                # Log but don't fail if a command module has issues
-                import sys
                 print(f"Warning: Failed to load command module {module_name}: {e}", file=sys.stderr)
+
+    # 2. Load user plugins
+    plugin_dirs = [os.path.expanduser("~/.agfs/plugins")]
+
+    # Add directories from AGFS_PLUGIN_PATH environment variable
+    env_path = os.environ.get("AGFS_PLUGIN_PATH", "")
+    if env_path:
+        plugin_dirs.extend(env_path.split(os.pathsep))
+
+    for plugin_dir in plugin_dirs:
+        if plugin_dir and os.path.isdir(plugin_dir):
+            _load_plugins_from_dir(plugin_dir)
+
+
+def _load_plugins_from_dir(plugin_dir: str):
+    """Load all .py plugin files from a directory."""
+    import importlib.util
+    import os
+    import sys
+
+    for filename in os.listdir(plugin_dir):
+        if filename.endswith('.py') and not filename.startswith('_'):
+            filepath = os.path.join(plugin_dir, filename)
+            module_name = f"agfs_plugin_{filename[:-3]}"
+
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, filepath)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+            except Exception as e:
+                print(f"Warning: Failed to load plugin {filepath}: {e}", file=sys.stderr)
 
 
 # Backward compatibility: BUILTINS dictionary

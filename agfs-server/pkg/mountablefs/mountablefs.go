@@ -1311,6 +1311,52 @@ func (mfs *MountableFS) Readlink(linkPath string) (string, error) {
 	return target, nil
 }
 
+// CustomGrepResult represents a custom grep search result
+type CustomGrepResult struct {
+	File     string                 `json:"file"`     // File path
+	Line     int                    `json:"line"`     // Line number
+	Content  string                 `json:"content"`  // Matched content
+	Metadata map[string]interface{} `json:"metadata,omitempty"` // Additional metadata (e.g., distance score)
+}
+
+// CustomGrepper interface for plugins that provide custom grep implementation
+// This allows plugins to implement their own search logic (e.g., vector search, fuzzy search, etc.)
+type CustomGrepper interface {
+	CustomGrep(path, query string, limit int) ([]CustomGrepResult, error)
+}
+
+// CustomGrep performs custom grep on mounted plugins that support it
+// Returns custom search results if the path belongs to a plugin with CustomGrepper implementation
+// limit specifies the maximum number of results to return (0 means use default)
+func (mfs *MountableFS) CustomGrep(path, query string, limit int) ([]CustomGrepResult, error) {
+	path = filesystem.NormalizePath(path)
+
+	// Find the mount point for this path
+	mount, relPath, found := mfs.findMount(path)
+	if !found {
+		return nil, filesystem.NewNotFoundError("path", path)
+	}
+
+	// Check if the plugin's filesystem implements CustomGrepper
+	grepper, ok := mount.Plugin.GetFileSystem().(CustomGrepper)
+	if !ok {
+		return nil, fmt.Errorf("path does not support custom grep: %s", path)
+	}
+
+	// Call the plugin's CustomGrep method with the relative path
+	results, err := grepper.CustomGrep(relPath, query, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prepend mount path to file paths in results
+	for i := range results {
+		results[i].File = filesystem.NormalizePath(mount.Path + "/" + results[i].File)
+	}
+
+	return results, nil
+}
+
 // Ensure MountableFS implements HandleFS interface
 var _ filesystem.HandleFS = (*MountableFS)(nil)
 var _ filesystem.FileHandle = (*globalFileHandle)(nil)

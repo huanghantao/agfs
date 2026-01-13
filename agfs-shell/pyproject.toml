@@ -31,9 +31,6 @@ pyagfs = { path = "../agfs-sdk/python", editable = true }
 [project.scripts]
 agfs-shell = "agfs_shell.cli:main"
 
-[tool.uv]
-dev-dependencies = []
-
 [tool.hatch.build.targets.wheel]
 packages = ["agfs_shell"]
 

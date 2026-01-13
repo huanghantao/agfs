@@ -1949,6 +1949,12 @@ func (fs *sqlfs2FS) Chmod(path string, mode uint32) error {
 	return fmt.Errorf("operation not supported: chmod")
 }
 
+// Truncate is a no-op for sqlfs2 since control files are virtual
+// This allows shell redirections to work properly
+func (fs *sqlfs2FS) Truncate(path string, size int64) error {
+	return nil
+}
+
 func (fs *sqlfs2FS) Open(path string) (io.ReadCloser, error) {
 	data, err := fs.Read(path, 0, -1)
 	if err != nil && err != io.EOF {

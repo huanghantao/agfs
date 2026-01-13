@@ -204,8 +204,7 @@ const Terminal = ({ wsRef }) => {
       }
       // Handle Ctrl+L (clear screen)
       else if (code === 12) {
-        term.clear();
-        term.write('$ ' + currentLine);
+        term.write('\x1b[2J\x1b[H$ ' + currentLine);
       }
       // Handle Ctrl+U (clear line)
       else if (code === 21) {

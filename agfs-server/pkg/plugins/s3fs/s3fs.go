@@ -356,7 +356,7 @@ func (fs *S3FS) Stat(path string) (*filesystem.FileInfo, error) {
 				Content: map[string]string{
 					"region": fs.client.region,
 					"bucket": fs.client.bucket,
-					"prefix": fs.client.prefix,
+					"prefix": fs.client.rawPrefix,
 				},
 			},
 		}, nil
@@ -382,7 +382,7 @@ func (fs *S3FS) Stat(path string) (*filesystem.FileInfo, error) {
 				Content: map[string]string{
 					"region": fs.client.region,
 					"bucket": fs.client.bucket,
-					"prefix": fs.client.prefix,
+					"prefix": fs.client.rawPrefix,
 				},
 			},
 		}
@@ -409,7 +409,7 @@ func (fs *S3FS) Stat(path string) (*filesystem.FileInfo, error) {
 				Content: map[string]string{
 					"region": fs.client.region,
 					"bucket": fs.client.bucket,
-					"prefix": fs.client.prefix,
+					"prefix": fs.client.rawPrefix,
 				},
 			},
 		}
@@ -537,19 +537,11 @@ func (p *S3FSPlugin) Validate(cfg map[string]interface{}) error {
 		}
 	}
 
-	// Validate disable_ssl (optional boolean)
-	if err := config.ValidateBoolType(cfg, "disable_ssl"); err != nil {
-		return err
-	}
-
-	// Validate use_path_request_style (optional boolean)
-	if err := config.ValidateBoolType(cfg, "use_path_request_style"); err != nil {
-		return err
-	}
-
-	// Validate cache_enabled (optional boolean)
-	if err := config.ValidateBoolType(cfg, "cache_enabled"); err != nil {
-		return err
+	// Validate boolean parameters
+	for _, key := range []string{"disable_ssl", "use_path_request_style", "cache_enabled"} {
+		if err := config.ValidateBoolType(cfg, key); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -643,7 +635,7 @@ func (p *S3FSPlugin) GetConfigParams() []plugin.ConfigParameter {
 			Type:        "string",
 			Required:    false,
 			Default:     "",
-			Description: "Key prefix for namespace isolation",
+			Description: "Key prefix for namespace isolation. Nested prefixes (e.g., 'team1' and 'team1/test') are automatically isolated.",
 		},
 		{
 			Name:        "disable_ssl",
@@ -706,6 +698,7 @@ FEATURES:
   - Streaming support for efficient large file handling
   - Automatic directory handling
   - Optional key prefix for namespace isolation
+  - Automatic strict isolation for nested prefixes
 
 CONFIGURATION:
 
@@ -755,6 +748,30 @@ CONFIGURATION:
     bucket = "development-bucket"
     access_key_id = "..."
     secret_access_key = "..."
+
+  Nested Prefix Isolation (Automatic):
+  Multiple instances with nested prefixes are automatically isolated.
+  No special configuration needed:
+
+  [plugins.s3fs_team1]
+  enabled = true
+  path = "/team1"
+
+    [plugins.s3fs_team1.config]
+    bucket = "shared-bucket"
+    prefix = "team1"
+
+  [plugins.s3fs_team1_test]
+  enabled = true
+  path = "/team1_test"
+
+    [plugins.s3fs_team1_test.config]
+    bucket = "shared-bucket"
+    prefix = "team1/test"
+
+  ✓ Prefixes are automatically wrapped with delimiters for complete isolation
+  ✓ "team1" and "team1/test" will not interfere with each other
+  ✓ No risk of accidental data deletion or visibility across instances
 
 USAGE:
 
@@ -807,6 +824,17 @@ NOTES:
   - Permissions (chmod) are not supported by S3
   - Atomic operations are limited by S3's eventual consistency model
   - Streaming is automatically used when accessing via Python SDK with stream=True
+
+PREFIX ISOLATION:
+  - All prefixes are automatically wrapped with delimiters for strict isolation
+  - Format: "__PREFIX__<user-prefix>__/path"
+  - Example: prefix "team1" stores as "__PREFIX__team1__/file.txt" in S3
+  - Nested prefixes (e.g., "team1" and "team1/test") are completely isolated
+  - No configuration needed - isolation is automatic and always enabled
+  - This ensures:
+    • Complete data isolation between instances
+    • No risk of accidental deletion across prefixes
+    • No cache pollution
 
 USE CASES:
   - Cloud-native file storage

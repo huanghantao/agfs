@@ -408,12 +408,16 @@ func (hm *HandleManager) Write(fuseHandle uint64, data []byte, offset int64) (in
 	path := info.path
 	hm.mu.Unlock()
 
+	log.Debugf("[handles] Local handle write: path=%s, len=%d, offset=%d", path, len(data), offset)
+
 	// Send directly to server
 	_, err := hm.client.Write(path, data)
 	if err != nil {
+		log.Errorf("[handles] Write failed for %s: %v", path, err)
 		return 0, fmt.Errorf("failed to write to server: %w", err)
 	}
 
+	log.Debugf("[handles] Write success for %s: %d bytes", path, len(data))
 	return len(data), nil
 }
 

@@ -1,0 +1,940 @@
+package vectorfs
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/c4pt0r/agfs/agfs-server/pkg/filesystem"
+	"github.com/c4pt0r/agfs/agfs-server/pkg/mountablefs"
+	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin"
+	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin/config"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	PluginName = "vectorfs"
+)
+
+// VectorFSPlugin provides a document vector search service
+type indexTask struct {
+	namespace string
+	digest    string
+	fileName  string
+	data      string
+}
+
+// indexingFileInfo tracks a file being indexed
+type indexingFileInfo struct {
+	FileName  string
+	StartTime time.Time
+}
+
+type VectorFSPlugin struct {
+	s3Client        *S3Client
+	tidbClient      *TiDBClient
+	embeddingClient *EmbeddingClient
+	indexer         *Indexer
+	mu              sync.RWMutex
+	metadata        plugin.PluginMetadata
+
+	// Index worker pool
+	indexQueue chan indexTask
+	workerWg   sync.WaitGroup
+	shutdown   chan struct{}
+
+	// Indexing status tracking: namespace -> (digest -> fileInfo)
+	indexingStatus   map[string]map[string]*indexingFileInfo
+	indexingStatusMu sync.RWMutex
+}
+
+// NewVectorFSPlugin creates a new VectorFS plugin
+func NewVectorFSPlugin() *VectorFSPlugin {
+	return &VectorFSPlugin{
+		metadata: plugin.PluginMetadata{
+			Name:        PluginName,
+			Version:     "1.0.0",
+			Description: "Document vector search plugin with S3 storage and TiDB Cloud vector index",
+			Author:      "AGFS Server",
+		},
+	}
+}
+
+func (v *VectorFSPlugin) Name() string {
+	return v.metadata.Name
+}
+
+func (v *VectorFSPlugin) Validate(cfg map[string]interface{}) error {
+	// Allowed configuration keys
+	allowedKeys := []string{
+		"mount_path",
+		// S3 configuration
+		"s3_access_key", "s3_secret_key", "s3_bucket", "s3_key_prefix", "s3_region", "s3_endpoint",
+		// TiDB configuration
+		"tidb_dsn", "tidb_host", "tidb_port", "tidb_user", "tidb_password", "tidb_database",
+		// Embedding configuration
+		"embedding_provider", "openai_api_key", "embedding_model", "embedding_dim",
+		// Chunking configuration
+		"chunk_size", "chunk_overlap",
+		// Worker pool configuration
+		"index_workers",
+	}
+	if err := config.ValidateOnlyKnownKeys(cfg, allowedKeys); err != nil {
+		return err
+	}
+
+	// Validate S3 configuration
+	if config.GetStringConfig(cfg, "s3_bucket", "") == "" {
+		return fmt.Errorf("s3_bucket is required")
+	}
+
+	// Validate TiDB configuration
+	if config.GetStringConfig(cfg, "tidb_dsn", "") == "" {
+		return fmt.Errorf("tidb_dsn is required")
+	}
+
+	// Validate embedding configuration
+	provider := config.GetStringConfig(cfg, "embedding_provider", "openai")
+	if provider == "openai" {
+		if config.GetStringConfig(cfg, "openai_api_key", "") == "" {
+			return fmt.Errorf("openai_api_key is required when using openai provider")
+		}
+	}
+
+	return nil
+}
+
+func (v *VectorFSPlugin) Initialize(cfg map[string]interface{}) error {
+	// Initialize S3 client
+	s3Config := S3Config{
+		AccessKey: config.GetStringConfig(cfg, "s3_access_key", ""),
+		SecretKey: config.GetStringConfig(cfg, "s3_secret_key", ""),
+		Bucket:    config.GetStringConfig(cfg, "s3_bucket", ""),
+		KeyPrefix: config.GetStringConfig(cfg, "s3_key_prefix", "vectorfs"),
+		Region:    config.GetStringConfig(cfg, "s3_region", "us-east-1"),
+		Endpoint:  config.GetStringConfig(cfg, "s3_endpoint", ""),
+	}
+
+	s3Client, err := NewS3Client(s3Config)
+	if err != nil {
+		return fmt.Errorf("failed to initialize S3 client: %w", err)
+	}
+	v.s3Client = s3Client
+
+	// Initialize TiDB client
+	tidbConfig := TiDBConfig{
+		DSN: config.GetStringConfig(cfg, "tidb_dsn", ""),
+	}
+
+	tidbClient, err := NewTiDBClient(tidbConfig)
+	if err != nil {
+		return fmt.Errorf("failed to initialize TiDB client: %w", err)
+	}
+	v.tidbClient = tidbClient
+
+	// Initialize embedding client
+	embeddingConfig := EmbeddingConfig{
+		Provider: config.GetStringConfig(cfg, "embedding_provider", "openai"),
+		APIKey:   config.GetStringConfig(cfg, "openai_api_key", ""),
+		Model:    config.GetStringConfig(cfg, "embedding_model", "text-embedding-3-small"),
+		Dimension: config.GetIntConfig(cfg, "embedding_dim", 1536),
+	}
+
+	embeddingClient, err := NewEmbeddingClient(embeddingConfig)
+	if err != nil {
+		return fmt.Errorf("failed to initialize embedding client: %w", err)
+	}
+	v.embeddingClient = embeddingClient
+
+	// Initialize indexer
+	chunkerConfig := ChunkerConfig{
+		ChunkSize:    config.GetIntConfig(cfg, "chunk_size", 512),
+		ChunkOverlap: config.GetIntConfig(cfg, "chunk_overlap", 50),
+	}
+
+	v.indexer = NewIndexer(v.s3Client, v.tidbClient, v.embeddingClient, chunkerConfig)
+
+	// Initialize indexing status tracking
+	v.indexingStatus = make(map[string]map[string]*indexingFileInfo)
+
+	// Initialize worker pool for async indexing
+	workerCount := config.GetIntConfig(cfg, "index_workers", 4)
+	v.indexQueue = make(chan indexTask, 100) // Buffer size 100
+	v.shutdown = make(chan struct{})
+
+	// Start worker pool
+	for i := 0; i < workerCount; i++ {
+		v.workerWg.Add(1)
+		go v.indexWorker(i)
+	}
+
+	log.Infof("[vectorfs] Initialized successfully with %d index workers", workerCount)
+	return nil
+}
+
+// addIndexingTask registers a file as being indexed
+func (v *VectorFSPlugin) addIndexingTask(namespace, digest, fileName string) {
+	v.indexingStatusMu.Lock()
+	defer v.indexingStatusMu.Unlock()
+
+	if v.indexingStatus[namespace] == nil {
+		v.indexingStatus[namespace] = make(map[string]*indexingFileInfo)
+	}
+	v.indexingStatus[namespace][digest] = &indexingFileInfo{
+		FileName:  fileName,
+		StartTime: time.Now(),
+	}
+}
+
+// removeIndexingTask removes a file from the indexing status
+func (v *VectorFSPlugin) removeIndexingTask(namespace, digest string) {
+	v.indexingStatusMu.Lock()
+	defer v.indexingStatusMu.Unlock()
+
+	if v.indexingStatus[namespace] != nil {
+		delete(v.indexingStatus[namespace], digest)
+		if len(v.indexingStatus[namespace]) == 0 {
+			delete(v.indexingStatus, namespace)
+		}
+	}
+}
+
+// getIndexingStatus returns the indexing status for a namespace
+func (v *VectorFSPlugin) getIndexingStatus(namespace string) string {
+	v.indexingStatusMu.RLock()
+	defer v.indexingStatusMu.RUnlock()
+
+	tasks := v.indexingStatus[namespace]
+	if len(tasks) == 0 {
+		return "idle"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("indexing %d file(s):\n", len(tasks)))
+	for _, info := range tasks {
+		elapsed := time.Since(info.StartTime).Round(time.Second)
+		sb.WriteString(fmt.Sprintf("  - %s (%v)\n", info.FileName, elapsed))
+	}
+	return sb.String()
+}
+
+// indexWorker processes chunk indexing tasks from the queue
+// Note: S3 upload and metadata registration are done synchronously in Write(),
+// so this worker only handles chunking, embedding generation, and chunk storage.
+func (v *VectorFSPlugin) indexWorker(id int) {
+	defer v.workerWg.Done()
+
+	for {
+		select {
+		case <-v.shutdown:
+			log.Debugf("[vectorfs] Index worker %d shutting down", id)
+			return
+		case task := <-v.indexQueue:
+			err := v.indexer.IndexChunks(task.namespace, task.digest, task.fileName, task.data)
+			if err != nil {
+				log.Errorf("[vectorfs] Worker %d failed to index chunks for %s: %v", id, task.fileName, err)
+			}
+			// Remove from indexing status regardless of success/failure
+			v.removeIndexingTask(task.namespace, task.digest)
+		}
+	}
+}
+
+func (v *VectorFSPlugin) GetFileSystem() filesystem.FileSystem {
+	return &vectorFS{plugin: v}
+}
+
+func (v *VectorFSPlugin) GetReadme() string {
+	return `VectorFS Plugin - Document Vector Search
+
+This plugin provides semantic search capabilities for documents using:
+- S3 for document storage
+- TiDB Cloud vector index for fast similarity search
+- OpenAI embeddings (default)
+
+STRUCTURE:
+  /vectorfs/
+    README              - This documentation
+    <namespace>/        - Project/namespace directory
+      docs/             - Document directory (auto-indexed on write)
+      .indexing         - Indexing status (virtual file)
+
+WORKFLOW:
+  1. Create a namespace (project):
+     mkdir /vectorfs/my_project
+
+  2. Write documents (will be auto-indexed):
+     echo "content" > /vectorfs/my_project/docs/document.txt
+
+  3. Search documents using grep:
+     grep 'how to deploy' /vectorfs/my_project/docs
+
+     This will perform vector similarity search and return relevant chunks.
+
+  4. Read indexed documents:
+     cat /vectorfs/my_project/docs/document.txt
+
+CONFIGURATION:
+  [plugins.vectorfs]
+  enabled = true
+  path = "/vectorfs"
+
+    [plugins.vectorfs.config]
+    # S3 Storage
+    s3_bucket = "my-docs"
+    s3_key_prefix = "vectorfs"
+    s3_region = "us-east-1"
+    s3_access_key = "..."
+    s3_secret_key = "..."
+
+    # TiDB Cloud Vector Database
+    tidb_dsn = "user:pass@tcp(host:4000)/dbname?tls=true"
+
+    # Embeddings
+    embedding_provider = "openai"
+    openai_api_key = "sk-..."
+    embedding_model = "text-embedding-3-small"
+    embedding_dim = 1536
+
+    # Chunking (optional)
+    chunk_size = 512
+    chunk_overlap = 50
+
+FEATURES:
+  - Automatic indexing on file write
+  - Deduplication using file digest (SHA256)
+  - Semantic search via grep command
+  - S3 storage for scalability
+  - TiDB Cloud vector index for fast search
+
+NOTES:
+  - Files are automatically indexed when written to docs/ directory
+  - Same content (same digest) won't be indexed twice
+  - grep command performs vector similarity search
+  - Results include file path, chunk text, and relevance score
+`
+}
+
+func (v *VectorFSPlugin) GetConfigParams() []plugin.ConfigParameter {
+	return []plugin.ConfigParameter{
+		// S3 parameters
+		{Name: "s3_access_key", Type: "string", Required: false, Default: "", Description: "S3 access key"},
+		{Name: "s3_secret_key", Type: "string", Required: false, Default: "", Description: "S3 secret key"},
+		{Name: "s3_bucket", Type: "string", Required: true, Default: "", Description: "S3 bucket name"},
+		{Name: "s3_key_prefix", Type: "string", Required: false, Default: "vectorfs", Description: "S3 key prefix"},
+		{Name: "s3_region", Type: "string", Required: false, Default: "us-east-1", Description: "S3 region"},
+		{Name: "s3_endpoint", Type: "string", Required: false, Default: "", Description: "Custom S3 endpoint"},
+		// TiDB parameters
+		{Name: "tidb_dsn", Type: "string", Required: true, Default: "", Description: "TiDB connection string (DSN)"},
+		// Embedding parameters
+		{Name: "embedding_provider", Type: "string", Required: false, Default: "openai", Description: "Embedding provider (openai)"},
+		{Name: "openai_api_key", Type: "string", Required: true, Default: "", Description: "OpenAI API key"},
+		{Name: "embedding_model", Type: "string", Required: false, Default: "text-embedding-3-small", Description: "OpenAI embedding model"},
+		{Name: "embedding_dim", Type: "int", Required: false, Default: "1536", Description: "Embedding dimension"},
+		// Chunking parameters
+		{Name: "chunk_size", Type: "int", Required: false, Default: "512", Description: "Chunk size in tokens"},
+		{Name: "chunk_overlap", Type: "int", Required: false, Default: "50", Description: "Chunk overlap in tokens"},
+		// Worker pool parameters
+		{Name: "index_workers", Type: "int", Required: false, Default: "4", Description: "Number of concurrent indexing workers"},
+	}
+}
+
+func (v *VectorFSPlugin) Shutdown() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	// Shutdown worker pool
+	if v.shutdown != nil {
+		close(v.shutdown)
+		close(v.indexQueue)
+		v.workerWg.Wait() // Wait for all workers to finish
+		log.Info("[vectorfs] All index workers shut down")
+	}
+
+	if v.tidbClient != nil {
+		v.tidbClient.Close()
+	}
+
+	return nil
+}
+
+// CustomGrep implements the CustomGrepper interface using vector search
+func (vfs *vectorFS) CustomGrep(path, query string, limit int) ([]mountablefs.CustomGrepResult, error) {
+	// Parse path to get namespace
+	namespace, relativePath, err := parsePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only support search in docs/ directory
+	if !strings.HasPrefix(relativePath, "docs") && relativePath != "docs" {
+		return nil, fmt.Errorf("vector search only supported in docs/ directory")
+	}
+
+	// Use VectorSearch method (dependency injection point)
+	return vfs.VectorSearch(namespace, query, limit)
+}
+
+// VectorSearch performs vector similarity search using embeddings
+// This method can be injected/replaced for testing or alternative implementations
+// limit specifies the maximum number of results to return
+func (vfs *vectorFS) VectorSearch(namespace, query string, limit int) ([]mountablefs.CustomGrepResult, error) {
+	// Generate embedding for query
+	queryEmbedding, err := vfs.plugin.embeddingClient.GenerateEmbedding(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate query embedding: %w", err)
+	}
+
+	// Perform vector search in TiDB
+	results, err := vfs.plugin.tidbClient.VectorSearch(namespace, queryEmbedding, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to perform vector search: %w", err)
+	}
+
+	// Convert to CustomGrepResult format
+	var matches []mountablefs.CustomGrepResult
+	for _, result := range results {
+		matches = append(matches, mountablefs.CustomGrepResult{
+			File:    namespace + "/docs/" + result.FileName,
+			Line:    result.ChunkIndex + 1, // 1-indexed line numbers
+			Content: result.ChunkText,
+			Metadata: map[string]interface{}{
+				"distance": result.Distance,
+				"score":    1.0 - result.Distance, // Convert distance to similarity score
+			},
+		})
+	}
+
+	return matches, nil
+}
+
+// vectorFS implements the FileSystem interface for vector operations
+type vectorFS struct {
+	plugin *VectorFSPlugin
+}
+
+// parsePath parses a path like "/namespace/docs/file.txt" into (namespace, "docs/file.txt")
+func parsePath(path string) (namespace string, relativePath string, err error) {
+	path = filepath.Clean(path)
+	path = strings.TrimPrefix(path, "/")
+
+	if path == "" || path == "." {
+		return "", "", nil
+	}
+
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) == 0 {
+		return "", "", fmt.Errorf("invalid path")
+	}
+
+	namespace = parts[0]
+	if len(parts) == 2 {
+		relativePath = parts[1]
+	}
+
+	return namespace, relativePath, nil
+}
+
+func (vfs *vectorFS) Create(path string) error {
+	// Create an empty file by writing empty content
+	// This ensures the file exists for subsequent Stat/Open operations
+	_, err := vfs.Write(path, []byte{}, 0, filesystem.WriteFlagCreate)
+	return err
+}
+
+func (vfs *vectorFS) Mkdir(path string, perm uint32) error {
+	namespace, relativePath, err := parsePath(path)
+	if err != nil {
+		return err
+	}
+
+	// If creating subdirectory under docs/, create a placeholder file
+	// so the directory is visible in listings and Stat operations
+	if relativePath != "" {
+		if strings.HasPrefix(relativePath, "docs/") {
+			// Create a hidden .keep file to make the directory visible
+			dirName := strings.TrimPrefix(relativePath, "docs/")
+			keepFilePath := path + "/.keep"
+			_, err := vfs.Write(keepFilePath, []byte(""), 0, filesystem.WriteFlagCreate)
+			if err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", dirName, err)
+			}
+			return nil
+		}
+		return fmt.Errorf("can only create namespace directories or docs/ subdirectories")
+	}
+
+	if namespace == "" {
+		return fmt.Errorf("invalid namespace name")
+	}
+
+	// Create tables for this namespace
+	return vfs.plugin.tidbClient.CreateNamespace(namespace, vfs.plugin.embeddingClient.GetDimension())
+}
+
+func (vfs *vectorFS) Remove(path string) error {
+	return fmt.Errorf("remove not supported in vectorfs (use rm -r to delete entire namespace)")
+}
+
+func (vfs *vectorFS) RemoveAll(path string) error {
+	namespace, relativePath, err := parsePath(path)
+	if err != nil {
+		return err
+	}
+
+	// Only allow removing entire namespace (not subdirectories)
+	if relativePath != "" {
+		return fmt.Errorf("can only remove entire namespace, not subdirectories (path: %s)", path)
+	}
+
+	if namespace == "" {
+		return fmt.Errorf("cannot remove root directory")
+	}
+
+	// Delete the namespace (drops all tables)
+	return vfs.plugin.tidbClient.DeleteNamespace(namespace)
+}
+
+func (vfs *vectorFS) Read(path string, offset int64, size int64) ([]byte, error) {
+	// Special case: README at root
+	if path == "/README" {
+		data := []byte(vfs.plugin.GetReadme())
+		return plugin.ApplyRangeRead(data, offset, size)
+	}
+
+	namespace, relativePath, err := parsePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle virtual .indexing file
+	if relativePath == ".indexing" {
+		status := vfs.plugin.getIndexingStatus(namespace)
+		return []byte(status), nil
+	}
+
+	// Only allow reading from docs/ directory
+	if !strings.HasPrefix(relativePath, "docs/") {
+		return nil, fmt.Errorf("can only read files from docs/ directory")
+	}
+
+	// Extract filename from path (support subdirectories)
+	// relativePath format: "docs/subdir/file.txt" or "docs/file.txt"
+	fileName := strings.TrimPrefix(relativePath, "docs/")
+	if fileName == "" || fileName == "/" {
+		return nil, fmt.Errorf("cannot read directory, specify a file")
+	}
+
+	// Get file metadata from TiDB (includes S3 key and digest)
+	meta, err := vfs.plugin.tidbClient.GetFileMetadataByName(namespace, fileName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file metadata: %w", err)
+	}
+
+	// Download document from S3 using digest
+	ctx := context.Background()
+	data, err := vfs.plugin.s3Client.DownloadDocument(ctx, namespace, meta.FileDigest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download document from S3: %w", err)
+	}
+
+	log.Debugf("[vectorfs] Read file: %s (namespace: %s, digest: %s, size: %d bytes)",
+		fileName, namespace, meta.FileDigest, len(data))
+
+	// Apply range read if requested
+	return plugin.ApplyRangeRead(data, offset, size)
+}
+
+func (vfs *vectorFS) Write(path string, data []byte, offset int64, flags filesystem.WriteFlag) (int64, error) {
+	log.Debugf("[vectorfs] Write called: path=%s, len=%d, offset=%d", path, len(data), offset)
+
+	namespace, relativePath, err := parsePath(path)
+	if err != nil {
+		log.Errorf("[vectorfs] Write parsePath failed: path=%s, err=%v", path, err)
+		return 0, err
+	}
+
+	log.Debugf("[vectorfs] Write parsed: namespace=%s, relativePath=%s", namespace, relativePath)
+
+	// Only allow writing to docs/ directory
+	if !strings.HasPrefix(relativePath, "docs/") {
+		log.Errorf("[vectorfs] Write rejected: path=%s not in docs/", path)
+		return 0, fmt.Errorf("can only write files to docs/ directory")
+	}
+
+	// Calculate file digest - include filename for empty files to avoid collision
+	// (all empty files would have the same content hash otherwise)
+	var digest string
+	if len(data) == 0 {
+		// For empty files, use hash of filename to ensure uniqueness
+		hash := sha256.Sum256([]byte("empty:" + relativePath))
+		digest = hex.EncodeToString(hash[:])
+	} else {
+		hash := sha256.Sum256(data)
+		digest = hex.EncodeToString(hash[:])
+	}
+
+	// Extract relative path from docs/ (includes subdirectories)
+	// relativePath format: "docs/subdir/file.txt" -> fileName: "subdir/file.txt"
+	fileName := strings.TrimPrefix(relativePath, "docs/")
+	content := string(data)
+
+	log.Debugf("[vectorfs] Write: namespace=%s, fileName=%s, digest=%s, len=%d", namespace, fileName, digest[:16], len(data))
+
+	// Delete any existing versions of this file before writing new content
+	// This prevents duplicate entries with different digests for the same filename
+	if err := vfs.plugin.tidbClient.DeleteFileByName(namespace, fileName); err != nil {
+		log.Warnf("[vectorfs] Failed to delete old versions of %s: %v", fileName, err)
+		// Continue anyway - the write might still succeed
+	}
+
+	// Phase 1 (synchronous): Upload to S3 and register metadata in TiDB
+	// After this, the file is immediately visible via ls/cat
+	alreadyExists, err := vfs.plugin.indexer.PrepareDocument(namespace, digest, fileName, content)
+	if err != nil {
+		log.Errorf("[vectorfs] PrepareDocument failed: %v", err)
+		return 0, fmt.Errorf("failed to prepare document: %w", err)
+	}
+	log.Debugf("[vectorfs] PrepareDocument done: alreadyExists=%v", alreadyExists)
+
+	// If document already exists (same content), no need to re-index chunks
+	if alreadyExists {
+		return int64(len(data)), nil
+	}
+
+	// Phase 2 (async): Queue chunk indexing for vector search
+	task := indexTask{
+		namespace: namespace,
+		digest:    digest,
+		fileName:  fileName,
+		data:      content,
+	}
+
+	// Register task in indexing status before queuing
+	vfs.plugin.addIndexingTask(namespace, digest, fileName)
+
+	// Non-blocking send to queue with proper overflow handling
+	select {
+	case vfs.plugin.indexQueue <- task:
+		// Task queued successfully
+	default:
+		// Queue is full - use a goroutine with shutdown awareness to avoid leak
+		log.Warnf("[vectorfs] Index queue full, document %s will be indexed when queue has space", fileName)
+		go func(t indexTask) {
+			select {
+			case vfs.plugin.indexQueue <- t:
+				// Task eventually queued
+			case <-vfs.plugin.shutdown:
+				// System shutting down, remove from indexing status
+				vfs.plugin.removeIndexingTask(t.namespace, t.digest)
+				log.Warnf("[vectorfs] Shutdown while waiting to queue %s, task dropped", t.fileName)
+			}
+		}(task)
+	}
+
+	return int64(len(data)), nil
+}
+
+func (vfs *vectorFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
+	namespace, relativePath, err := parsePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+
+	// Root directory
+	if path == "/" || namespace == "" {
+		readme := vfs.plugin.GetReadme()
+		files := []filesystem.FileInfo{
+			{
+				Name:    "README",
+				Size:    int64(len(readme)),
+				Mode:    0444,
+				ModTime: now,
+				IsDir:   false,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "doc"},
+			},
+		}
+
+		// List all namespaces (get from TiDB)
+		namespaces, err := vfs.plugin.tidbClient.ListNamespaces()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, ns := range namespaces {
+			files = append(files, filesystem.FileInfo{
+				Name:    ns,
+				Size:    0,
+				Mode:    0755,
+				ModTime: now,
+				IsDir:   true,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "namespace"},
+			})
+		}
+
+		return files, nil
+	}
+
+	// Namespace directory
+	if relativePath == "" {
+		indexingStatus := vfs.plugin.getIndexingStatus(namespace)
+		return []filesystem.FileInfo{
+			{
+				Name:    "docs",
+				Size:    0,
+				Mode:    0755,
+				ModTime: now,
+				IsDir:   true,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "docs"},
+			},
+			{
+				Name:    ".indexing",
+				Size:    int64(len(indexingStatus)),
+				Mode:    0444,
+				ModTime: now,
+				IsDir:   false,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "status"},
+			},
+		}, nil
+	}
+
+	// docs/ directory or subdirectory under docs/
+	if relativePath == "docs" || strings.HasPrefix(relativePath, "docs/") {
+		// Determine the subdirectory prefix we're listing
+		// relativePath: "docs" -> subPrefix: ""
+		// relativePath: "docs/subdir" -> subPrefix: "subdir/"
+		var subPrefix string
+		if relativePath != "docs" {
+			subPrefix = strings.TrimPrefix(relativePath, "docs/") + "/"
+		}
+
+		// Use prefix-filtered query for better performance (database-level filtering)
+		var files []FileMetadata
+		var err error
+		if subPrefix != "" {
+			files, err = vfs.plugin.tidbClient.ListFilesWithPrefix(namespace, subPrefix)
+		} else {
+			files, err = vfs.plugin.tidbClient.ListFiles(namespace)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		// Track unique entries at this level
+		seenDirs := make(map[string]bool)
+		var fileInfos []filesystem.FileInfo
+
+		for _, f := range files {
+			fileName := f.FileName
+
+			// Remove the prefix to get relative path (if we have a prefix)
+			if subPrefix != "" {
+				fileName = strings.TrimPrefix(fileName, subPrefix)
+			}
+
+			// Check if there's a "/" in the remaining path (meaning it's in a subdirectory)
+			if idx := strings.Index(fileName, "/"); idx != -1 {
+				// This file is in a subdirectory, extract directory name
+				dirName := fileName[:idx]
+				if !seenDirs[dirName] {
+					seenDirs[dirName] = true
+					fileInfos = append(fileInfos, filesystem.FileInfo{
+						Name:    dirName,
+						Size:    0,
+						Mode:    0755,
+						ModTime: now,
+						IsDir:   true,
+						Meta:    filesystem.MetaData{Name: PluginName, Type: "directory"},
+					})
+				}
+			} else {
+				// This is a file at the current level
+				fileInfos = append(fileInfos, filesystem.FileInfo{
+					Name:    fileName,
+					Size:    f.FileSize,
+					Mode:    0644,
+					ModTime: f.UpdatedAt,
+					IsDir:   false,
+					Meta:    filesystem.MetaData{Name: PluginName, Type: "document"},
+				})
+			}
+		}
+
+		return fileInfos, nil
+	}
+
+	return nil, fmt.Errorf("not a directory")
+}
+
+func (vfs *vectorFS) Stat(path string) (*filesystem.FileInfo, error) {
+	if path == "/" {
+		return &filesystem.FileInfo{
+			Name:    "/",
+			Size:    0,
+			Mode:    0755,
+			ModTime: time.Now(),
+			IsDir:   true,
+			Meta:    filesystem.MetaData{Name: PluginName, Type: "root"},
+		}, nil
+	}
+
+	if path == "/README" {
+		readme := vfs.plugin.GetReadme()
+		return &filesystem.FileInfo{
+			Name:    "README",
+			Size:    int64(len(readme)),
+			Mode:    0444,
+			ModTime: time.Now(),
+			IsDir:   false,
+			Meta:    filesystem.MetaData{Name: PluginName, Type: "doc"},
+		}, nil
+	}
+
+	namespace, relativePath, err := parsePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Namespace directory
+	if relativePath == "" {
+		exists, err := vfs.plugin.tidbClient.NamespaceExists(namespace)
+		if err != nil || !exists {
+			return nil, filesystem.ErrNotFound
+		}
+
+		return &filesystem.FileInfo{
+			Name:    namespace,
+			Size:    0,
+			Mode:    0755,
+			ModTime: time.Now(),
+			IsDir:   true,
+			Meta:    filesystem.MetaData{Name: PluginName, Type: "namespace"},
+		}, nil
+	}
+
+	// docs directory
+	if relativePath == "docs" {
+		return &filesystem.FileInfo{
+			Name:    "docs",
+			Size:    0,
+			Mode:    0755,
+			ModTime: time.Now(),
+			IsDir:   true,
+			Meta:    filesystem.MetaData{Name: PluginName, Type: "docs"},
+		}, nil
+	}
+
+	// .indexing status file
+	if relativePath == ".indexing" {
+		indexingStatus := vfs.plugin.getIndexingStatus(namespace)
+		return &filesystem.FileInfo{
+			Name:    ".indexing",
+			Size:    int64(len(indexingStatus)),
+			Mode:    0444,
+			ModTime: time.Now(),
+			IsDir:   false,
+			Meta:    filesystem.MetaData{Name: PluginName, Type: "status"},
+		}, nil
+	}
+
+	// Handle files and subdirectories under docs/
+	if strings.HasPrefix(relativePath, "docs/") {
+		fileName := strings.TrimPrefix(relativePath, "docs/")
+		if fileName == "" {
+			return nil, filesystem.ErrNotFound
+		}
+
+		// First, try to get exact file match
+		meta, err := vfs.plugin.tidbClient.GetFileMetadataByName(namespace, fileName)
+		if err == nil {
+			// File exists
+			return &filesystem.FileInfo{
+				Name:    filepath.Base(fileName),
+				Size:    meta.FileSize,
+				Mode:    0644,
+				ModTime: meta.UpdatedAt,
+				IsDir:   false,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "document"},
+			}, nil
+		}
+
+		// Check if this is a virtual directory (any file has this prefix)
+		// Use HasFilesWithPrefix for O(1) check instead of loading all files
+		dirPrefix := fileName + "/"
+		hasFiles, err := vfs.plugin.tidbClient.HasFilesWithPrefix(namespace, dirPrefix)
+		if err != nil {
+			return nil, err
+		}
+
+		if hasFiles {
+			// This is a virtual directory
+			return &filesystem.FileInfo{
+				Name:    filepath.Base(fileName),
+				Size:    0,
+				Mode:    0755,
+				ModTime: time.Now(),
+				IsDir:   true,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "directory"},
+			}, nil
+		}
+
+		return nil, filesystem.ErrNotFound
+	}
+
+	return nil, filesystem.ErrNotFound
+}
+
+func (vfs *vectorFS) Rename(oldPath, newPath string) error {
+	return fmt.Errorf("rename not supported in vectorfs")
+}
+
+func (vfs *vectorFS) Chmod(path string, mode uint32) error {
+	// Silently ignore permission changes - vectorfs doesn't support permissions
+	return nil
+}
+
+// Truncate is a no-op for vectorfs since it's a document store
+// This allows shell redirections to work properly
+func (vfs *vectorFS) Truncate(path string, size int64) error {
+	return nil
+}
+
+func (vfs *vectorFS) Open(path string) (io.ReadCloser, error) {
+	data, err := vfs.Read(path, 0, -1)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(strings.NewReader(string(data))), nil
+}
+
+func (vfs *vectorFS) OpenWrite(path string) (io.WriteCloser, error) {
+	return &vectorWriter{vfs: vfs, path: path}, nil
+}
+
+type vectorWriter struct {
+	vfs  *vectorFS
+	path string
+	buf  strings.Builder
+}
+
+func (vw *vectorWriter) Write(p []byte) (n int, err error) {
+	return vw.buf.Write(p)
+}
+
+func (vw *vectorWriter) Close() error {
+	data := []byte(vw.buf.String())
+	_, err := vw.vfs.Write(vw.path, data, -1, filesystem.WriteFlagCreate)
+	return err
+}
+
+// Ensure VectorFSPlugin implements ServicePlugin
+var _ plugin.ServicePlugin = (*VectorFSPlugin)(nil)
+var _ filesystem.FileSystem = (*vectorFS)(nil)

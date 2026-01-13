@@ -151,6 +151,41 @@ plugins:
 #        prefix: agfs/ # Optional: all keys will be prefixed with "agfs/"
 #
 #  # ============================================================================
+#  # VectorFS - Document Vector Search (AI-Powered Semantic Search)
+#  # ============================================================================
+#  # VectorFS provides semantic search capabilities for documents using:
+#  # - S3 for scalable document storage
+#  # - TiDB Cloud vector index for fast similarity search
+#  # - OpenAI embeddings for vector representations
+#  #
+#  # See config.vectorfs.example.yaml for detailed configuration
+#  #
+#  vectorfs:
+#    enabled: false
+#    path: /vectorfs
+#    config:
+#      # S3 Configuration
+#      s3_bucket: "your-bucket-name"
+#      s3_key_prefix: "vectorfs"
+#      s3_region: "us-west-1"
+#      s3_access_key: "your-access-key"
+#      s3_secret_key: "your-secret-key"
+#
+#      # TiDB Cloud Configuration
+#      tidb_dsn: "user:pass@tcp(host:4000)/db?tls=true"
+#
+#      # OpenAI Configuration
+#      openai_api_key: "sk-..."
+#      embedding_model: "text-embedding-3-small"
+#      embedding_dim: 1536
+#
+#      # Performance tuning (optional)
+#      chunk_size: 512
+#      chunk_overlap: 50
+#      index_workers: 4
+#
+
+#  # ============================================================================
 #  # HTTPFS - HTTP File Server (Multiple Instances)
 #  # ============================================================================
 #  # HTTPFS serves AGFS paths over HTTP, similar to 'python3 -m http.server'.
@@ -231,6 +266,10 @@ plugins:
 # ├── sqlfs_tidb/     (database-backed filesystem - TiDB)
 # ├── httagfs-queue    (virtual status file - httagfs serving queuefs)
 # ├── httagfs-s3       (virtual status file - httagfs serving S3)
+# ├── vectorfs/       (AI-powered semantic document search)
+# │   ├── README      (VectorFS documentation)
+# │   └── <namespace>/
+# │       └── docs/   (indexed documents with semantic search)
 # ├── s3fs/
 # │   └── aws/        (AWS S3 storage)
 # └── proxyfs/
@@ -287,3 +326,25 @@ plugins:
 #   agfs mount httagfs /docs agfs_path=/memfs/docs http_port=8001
 #   agfs mount httagfs /images agfs_path=/memfs/images http_port=8002
 #   agfs mount httagfs /s3-public agfs_path=/s3fs/aws/public http_port=8003
+#
+# VectorFS - AI-Powered Semantic Search (when enabled):
+#   # Create a namespace
+#   agfs mkdir /vectorfs/my_docs
+#
+#   # Add documents (auto-indexed with embeddings)
+#   agfs write /vectorfs/my_docs/docs/guide.txt "Kubernetes deployment guide..."
+#   agfs write /vectorfs/my_docs/docs/tutorials/docker.txt "Docker tutorial..."
+#
+#   # Copy entire folders (async indexing, no timeout)
+#   agfs cp -r /s3fs/aws/docs /vectorfs/my_docs/docs/imported
+#
+#   # Read original documents
+#   agfs cat /vectorfs/my_docs/docs/guide.txt
+#   agfs cat /vectorfs/my_docs/docs/tutorials/docker.txt
+#
+#   # Semantic search (vector similarity, returns relevant chunks)
+#   agfs grep "how to deploy containers" /vectorfs/my_docs/docs
+#   # Returns results with similarity scores
+#
+#   # Use agfs-shell's fsgrep for better formatted output
+#   fsgrep -r "deployment strategies" /vectorfs/my_docs/docs

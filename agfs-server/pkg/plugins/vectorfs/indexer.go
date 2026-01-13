@@ -1,0 +1,169 @@
+package vectorfs
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	log "github.com/sirupsen/logrus"
+)
+
+// Indexer handles document indexing
+type Indexer struct {
+	s3Client        *S3Client
+	tidbClient      *TiDBClient
+	embeddingClient *EmbeddingClient
+	chunkerConfig   ChunkerConfig
+}
+
+// NewIndexer creates a new indexer
+func NewIndexer(
+	s3Client *S3Client,
+	tidbClient *TiDBClient,
+	embeddingClient *EmbeddingClient,
+	chunkerConfig ChunkerConfig,
+) *Indexer {
+	return &Indexer{
+		s3Client:        s3Client,
+		tidbClient:      tidbClient,
+		embeddingClient: embeddingClient,
+		chunkerConfig:   chunkerConfig,
+	}
+}
+
+// PrepareDocument uploads document to S3 and registers metadata in TiDB (synchronous phase).
+// After this completes, the file is visible via ls/cat.
+// Returns (alreadyExists, error) - if alreadyExists is true, no further indexing is needed.
+func (idx *Indexer) PrepareDocument(namespace, digest, fileName, content string) (bool, error) {
+	ctx := context.Background()
+
+	log.Infof("[vectorfs/indexer] Preparing document: %s (namespace: %s, digest: %s)",
+		fileName, namespace, digest)
+
+	// Check if content already indexed (same digest = same content)
+	// If so, skip S3 upload but still create file metadata for the new filename
+	contentExists, err := idx.tidbClient.FileExists(namespace, digest)
+	if err != nil {
+		return false, fmt.Errorf("failed to check if file exists: %w", err)
+	}
+
+	s3Key := idx.s3Client.buildKey(namespace, digest)
+
+	if !contentExists {
+		// Upload to S3 only if content doesn't exist
+		err = idx.s3Client.UploadDocument(ctx, namespace, digest, []byte(content))
+		if err != nil {
+			return false, fmt.Errorf("failed to upload to S3: %w", err)
+		}
+		log.Infof("[vectorfs/indexer] Uploaded to S3: %s", digest)
+	} else {
+		log.Infof("[vectorfs/indexer] Content already in S3, skipping upload: %s", digest)
+	}
+
+	// Always insert file metadata for the new filename
+	// This allows the same content to exist under multiple filenames
+	now := time.Now()
+	metadata := FileMetadata{
+		FileDigest: digest,
+		FileName:   fileName,
+		S3Key:      s3Key,
+		FileSize:   int64(len(content)),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+
+	err = idx.tidbClient.InsertFileMetadata(namespace, metadata)
+	if err != nil {
+		return false, fmt.Errorf("failed to insert file metadata: %w", err)
+	}
+
+	log.Infof("[vectorfs/indexer] Document prepared (metadata): %s", fileName)
+	// Return contentExists to indicate if chunk indexing can be skipped
+	return contentExists, nil
+}
+
+// IndexChunks performs chunking, embedding generation, and stores chunks in TiDB (async phase).
+// This is called after PrepareDocument to enable vector search on the document.
+func (idx *Indexer) IndexChunks(namespace, digest, fileName, content string) error {
+	log.Infof("[vectorfs/indexer] Indexing chunks for document: %s (namespace: %s, digest: %s)",
+		fileName, namespace, digest)
+
+	// Skip empty files - they have no content to index
+	if strings.TrimSpace(content) == "" {
+		log.Infof("[vectorfs/indexer] Skipping empty file: %s", fileName)
+		return nil
+	}
+
+	// Chunk the document
+	chunks := ChunkDocument(content, idx.chunkerConfig)
+	log.Infof("[vectorfs/indexer] Split into %d chunks", len(chunks))
+
+	// Generate embeddings for all chunks (batch)
+	var chunkTexts []string
+	for _, chunk := range chunks {
+		chunkTexts = append(chunkTexts, chunk.Text)
+	}
+
+	embeddings, err := idx.embeddingClient.GenerateBatchEmbeddings(chunkTexts)
+	if err != nil {
+		return fmt.Errorf("failed to generate embeddings: %w", err)
+	}
+
+	// Prepare chunk data for batch insert
+	chunkDataList := make([]ChunkData, len(chunks))
+	for i, chunk := range chunks {
+		chunkDataList[i] = ChunkData{
+			ChunkIndex: chunk.Index,
+			ChunkText:  chunk.Text,
+			Embedding:  embeddings[i],
+		}
+	}
+
+	// Batch insert all chunks (reduces N database round-trips to 1-2)
+	err = idx.tidbClient.InsertChunksBatch(namespace, digest, chunkDataList)
+	if err != nil {
+		return fmt.Errorf("failed to batch insert chunks: %w", err)
+	}
+
+	log.Infof("[vectorfs/indexer] Successfully indexed document: %s (%d chunks)",
+		fileName, len(chunks))
+	return nil
+}
+
+// IndexDocument indexes a document (upload to S3, chunk, generate embeddings, store in TiDB)
+// Deprecated: Use PrepareDocument + IndexChunks for better performance.
+// This method is kept for backward compatibility.
+func (idx *Indexer) IndexDocument(namespace, digest, fileName, content string) error {
+	alreadyExists, err := idx.PrepareDocument(namespace, digest, fileName, content)
+	if err != nil {
+		return err
+	}
+	if alreadyExists {
+		return nil
+	}
+	return idx.IndexChunks(namespace, digest, fileName, content)
+}
+
+// DeleteDocument removes a document from the index
+func (idx *Indexer) DeleteDocument(namespace, digest string) error {
+	ctx := context.Background()
+
+	// Delete chunks from TiDB
+	if err := idx.tidbClient.DeleteFileChunks(namespace, digest); err != nil {
+		return fmt.Errorf("failed to delete chunks: %w", err)
+	}
+
+	// Delete metadata from TiDB
+	if err := idx.tidbClient.DeleteFileMetadata(namespace, digest); err != nil {
+		return fmt.Errorf("failed to delete metadata: %w", err)
+	}
+
+	// Delete from S3
+	if err := idx.s3Client.DeleteDocument(ctx, namespace, digest); err != nil {
+		return fmt.Errorf("failed to delete from S3: %w", err)
+	}
+
+	log.Infof("[vectorfs/indexer] Deleted document: %s", digest)
+	return nil
+}

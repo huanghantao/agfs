@@ -138,6 +138,12 @@ func (fs *HelloFS) Chmod(path string, mode uint32) error {
 	return errors.New("read-only filesystem")
 }
 
+// Truncate is a no-op for hellofs
+// This allows shell redirections to work properly
+func (fs *HelloFS) Truncate(path string, size int64) error {
+	return nil
+}
+
 func (fs *HelloFS) Open(path string) (io.ReadCloser, error) {
 	return nil, errors.New("not implemented")
 }

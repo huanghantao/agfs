@@ -491,6 +491,12 @@ func (fs *HTTPFS) Chmod(path string, mode uint32) error {
 	return fmt.Errorf("httagfs is read-only via filesystem interface, use HTTP to access files")
 }
 
+// Truncate is a no-op for httpfs
+// This allows shell redirections to work properly
+func (fs *HTTPFS) Truncate(path string, size int64) error {
+	return nil
+}
+
 func (fs *HTTPFS) Open(path string) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("httagfs is read-only via filesystem interface, use HTTP to access files")
 }

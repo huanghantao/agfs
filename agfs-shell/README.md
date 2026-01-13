@@ -19,6 +19,7 @@ agfs-shell provides a lightweight interpreter with bash-like syntax, enabling sc
   - [Command Substitution](#command-substitution)
   - [Glob Patterns](#glob-patterns)
   - [Control Flow](#control-flow)
+  - [Background Jobs](#background-jobs)
   - [Functions](#functions)
   - [Heredoc](#heredoc)
 - [Built-in Commands](#built-in-commands)
@@ -27,8 +28,13 @@ agfs-shell provides a lightweight interpreter with bash-like syntax, enabling sc
   - [Environment Variables](#environment-variables)
   - [Conditional Testing](#conditional-testing)
   - [Control Flow Commands](#control-flow-commands)
+  - [Job Control Commands](#job-control-commands)
   - [AGFS Management](#agfs-management)
+    - [chroot](#chroot-path----exit)
+    - [plugins](#plugins)
+    - [mount](#mount-plugin-path-options)
   - [Utility Commands](#utility-commands)
+  - [Network Commands](#network-commands)
   - [AI Integration](#ai-integration)
 - [Script Files](#script-files)
 - [Interactive Features](#interactive-features)
@@ -43,11 +49,16 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 
 **Key Features:**
 - Unix-style pipelines and redirection
+- **Background job control** with `command &` syntax
 - Full scripting support with control flow
 - User-defined functions with local variables and recursion support
 - AGFS integration for distributed file operations
 - Tab completion and command history
 - AI-powered command (llm integration)
+- HTTP client with persistent state management
+- Command aliasing for custom shortcuts
+- VectorFS semantic search (fsgrep)
+- Chroot support for directory isolation
 - Pure Python implementation (no subprocess for builtins)
 
 **Note:** This is an educational shell implementation with full scripting capabilities including recursive functions and nested command substitution.
@@ -56,6 +67,7 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 
 ### Core Shell Features
 - **Pipelines**: Chain commands with `|` operator
+- **Background Jobs**: Run commands in background with `&` operator
 - **I/O Redirection**: `<`, `>`, `>>`, `2>`, `2>>`
 - **Heredoc**: Multi-line input with `<<` (supports variable expansion)
 - **Variables**: Assignment, expansion, special variables (`$?`, `$1`, `$@`, etc.)
@@ -66,16 +78,18 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 - **Functions**: User-defined functions with parameters, local variables, return values, and recursion
 - **Comments**: `#` and `//` style comments
 
-### Built-in Commands (42+)
-- **File Operations**: cd, pwd, ls, tree, cat, mkdir, touch, rm, mv, stat, cp, ln, upload, download
-- **Text Processing**: echo, grep, jq, wc, head, tail, tee, sort, uniq, tr, rev, cut
+### Built-in Commands (50+)
+- **File Operations**: cd, pwd, ls, tree, cat, mkdir, touch, rm, truncate, mv, stat, cp, ln, upload, download
+- **Text Processing**: echo, grep, fsgrep, jq, wc, head, tail, tee, sort, uniq, tr, rev, cut
 - **Path Utilities**: basename, dirname
 - **Variables**: export, env, unset, local
 - **Testing**: test, [ ]
 - **Control Flow**: break, continue, exit, return, true, false, source, .
-- **Utilities**: sleep, date, plugins, mount, help
+- **Job Control**: jobs, wait
+- **Utilities**: sleep, date, plugins, mount, chroot, alias, unalias, help
+- **Network**: http (HTTP client with persistent state)
 - **AI**: llm (LLM integration)
-- **Operators**: `&&` (AND), `||` (OR) for conditional command execution
+- **Operators**: `&&` (AND), `||` (OR) for conditional command execution, `&` for background jobs
 
 ### Interactive Features
 - **Tab Completion**: Commands and file paths (AGFS-aware)
@@ -95,12 +109,25 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 **AGFS Server must be running!**
 
 ```bash
-# Option 1: Run from source
+# Option 1: Use Docker (Recommended)
+# Pull the image
+docker pull c4pt0r/agfs:latest
+
+# Run the server with port mapping
+docker run -d -p 8080:8080 --name agfs-server c4pt0r/agfs:latest
+
+# With data persistence (mount /data directory)
+docker run -d -p 8080:8080 -v $(pwd)/data:/data --name agfs-server c4pt0r/agfs:latest
+
+# With custom configuration
+docker run -d -p 8080:8080 -v $(pwd)/config.yaml:/config.yaml --name agfs-server c4pt0r/agfs:latest
+
+# Verify server is running
+curl http://localhost:8080/api/v1/health
+
+# Option 2: Run from source
 cd agfs-server
 go run main.go
-
-# Option 2: Use Docker
-docker run -p 8080:8080 c4pt0r/agfs-server:latest
 ```
 
 ## Installation
@@ -130,6 +157,13 @@ agfs:/> for i in 1 2 3; do
 Count: 1
 Count: 2
 Count: 3
+
+agfs:/> sleep 3 &
+[1] 140234567890123
+agfs:/> jobs
+[1] Running      sleep 3
+agfs:/> # After 3 seconds...
+[1] Done         sleep 3
 ```
 
 ### Execute Command String
@@ -419,6 +453,88 @@ fi
 command1 || command2 || command3 || echo "All failed"
 ```
 
+### Background Jobs
+
+Run commands in the background to continue working while they execute:
+
+```bash
+# Basic background job
+sleep 10 &
+# Returns immediately with job ID: [1] 140234567890123
+
+# Multiple background jobs
+sleep 5 & sleep 3 & sleep 1 &
+
+# Background with output (output appears as job runs)
+echo "Processing..." &
+
+# Pipeline in background (entire pipeline runs in background)
+cat /local/tmp/large.txt | grep pattern | sort &
+
+# Check running jobs
+jobs
+# Output:
+# [1] Running      sleep 10
+# [2] Running      cat /local/tmp/large.txt | grep pattern | sort
+
+# Wait for all background jobs to complete
+wait
+
+# Wait for specific job
+sleep 30 &
+jobs              # Shows: [1] Running sleep 30
+wait 1            # Waits for job [1] to complete
+
+# Combining with other operators
+command1 && command2 &    # Run command2 in background if command1 succeeds
+sleep 5 & echo "Started"  # Start background job, then print message
+```
+
+**Job Control Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `jobs` | List all background jobs with status |
+| `jobs -l` | List jobs with thread IDs |
+| `wait` | Wait for all background jobs to complete |
+| `wait <job_id>` | Wait for specific job to complete |
+
+**Job States:**
+
+- **Running**: Job is currently executing
+- **Done**: Job completed successfully
+- **Failed**: Job completed with error (shows exit code)
+
+**Examples:**
+
+```bash
+# Long-running task in background
+cat /local/tmp/huge.log | grep ERROR | sort > /local/tmp/errors.txt &
+jobs                    # [1] Running ...
+# Continue working...
+wait 1                  # Wait for analysis to complete
+
+# Multiple parallel tasks
+for i in 1 2 3 4 5; do
+    sleep $i &          # Start each sleep in background
+done
+jobs                    # Shows all 5 jobs running
+wait                    # Wait for all to complete
+
+# Background job with notification
+(sleep 3; echo "Task complete!") &
+# After 3 seconds, you'll see: "Task complete!"
+# Then: [1] Done (sleep 3; echo "Task complete!")
+```
+
+**Notes:**
+
+- Background jobs output directly to terminal (output may interleave with prompt)
+- Jobs terminate when shell exits (waits for completion or Ctrl+C to force quit)
+- Background jobs receive empty stdin (cannot read from terminal)
+- Job IDs are unique within a shell session
+- See `BACKGROUND_JOBS.md` for detailed documentation
+
 ### Functions
 
 **Function Definition:**
@@ -686,6 +802,28 @@ rm /local/tmp/file.txt       # Remove file
 rm -r /local/tmp/mydir       # Remove directory recursively
 ```
 
+#### truncate -s SIZE FILE...
+Truncate or extend file to specified size.
+
+```bash
+truncate -s 0 file.txt           # Truncate file to zero bytes (empty file)
+truncate -s 1024 file.txt        # Truncate/extend file to 1024 bytes
+truncate --size=100 f1 f2        # Truncate multiple files to 100 bytes
+```
+
+**Options:**
+- `-s SIZE` or `--size=SIZE`: Set file size to SIZE bytes
+
+**Behavior:**
+- If SIZE is less than current file size, extra data is lost (file is truncated)
+- If SIZE is greater than current file size, file is extended with null bytes
+- SIZE must be a non-negative integer (number of bytes)
+
+**Use Cases:**
+- Clear log files without deleting them: `truncate -s 0 /local/tmp/app.log`
+- Preallocate file space: `truncate -s 1048576 large.dat`
+- Reset files to empty state while preserving permissions
+
 #### mv source dest
 Move or rename files/directories.
 
@@ -787,6 +925,58 @@ grep "pattern" file1.txt file2.txt
 # With pipeline
 cat /local/tmp/app.log | grep -i error | grep -v warning
 ```
+
+#### fsgrep [OPTIONS] PATTERN PATH
+Server-side grep using filesystem's custom implementation. **Supports VectorFS semantic search** and other custom grep implementations.
+
+```bash
+# VectorFS semantic search
+fsgrep "container orchestration" /vectorfs/project/docs
+fsgrep -n 5 "infrastructure automation" /vectorfs/namespace/docs
+
+# Regular text grep on other filesystems
+fsgrep "error" /local/tmp/app.log
+fsgrep -i "warning" /s3fs/aws/logs/
+fsgrep -c "TODO" /sqlfs/tidb/code/
+```
+
+**Options:**
+- `-r`: Recursive search (default for directories)
+- `-i`: Case insensitive (for text grep, not VectorFS)
+- `-n NUM`: Return top N results (for VectorFS, default 10)
+- `-c`: Count matches only
+- `-q`: Quiet mode (only show if matches found)
+
+**VectorFS Features:**
+- **Semantic search** using embeddings instead of exact pattern matching
+- Returns results ranked by relevance with similarity scores
+- Automatically searches all documents in namespace
+- Use `-n` to control how many results to return
+- Perfect for finding conceptually similar content
+
+**Examples:**
+
+```bash
+# Semantic search in documentation
+fsgrep "how to deploy containers" /vectorfs/docs
+# Output shows semantically similar results with relevance scores
+
+# Limit results
+fsgrep -n 3 "database migration" /vectorfs/project/docs
+
+# Count semantic matches
+fsgrep -c "API authentication" /vectorfs/codebase
+
+# Regular grep on other filesystems
+fsgrep -r "ERROR" /local/tmp/logs/
+fsgrep -i "exception" /s3fs/aws/app.log
+```
+
+**Use Cases:**
+- Find documentation by concept rather than exact keywords
+- Discover related code or content semantically
+- Search across large document collections efficiently
+- Fallback to traditional grep on non-VectorFS filesystems
 
 #### jq filter [files]
 Process JSON data.
@@ -1133,6 +1323,127 @@ if [ $? -eq 0 ]; then
 fi
 ```
 
+### Job Control Commands
+
+#### jobs [-l]
+List background jobs with their status.
+
+```bash
+# Start some background jobs
+sleep 10 &
+sleep 5 &
+cat /local/tmp/large.txt | grep pattern &
+
+# List all jobs
+jobs
+# Output:
+# [1] Running      sleep 10
+# [2] Running      sleep 5
+# [3] Running      cat /local/tmp/large.txt | grep pattern
+
+# List with thread IDs
+jobs -l
+# Output:
+# [1] 140234567890123 Running      sleep 10
+# [2] 140234567890456 Running      sleep 5
+# [3] 140234567890789 Running      cat /local/tmp/large.txt | grep pattern
+
+# After jobs complete
+jobs
+# Output:
+# (empty - completed jobs are automatically cleaned up after notification)
+```
+
+**Options:**
+- `-l`: Show thread IDs along with job information
+
+**Job Status:**
+- `Running`: Job is currently executing
+- `Done`: Job completed successfully (exit code 0)
+- `Failed (exit N)`: Job completed with non-zero exit code N
+
+**Behavior:**
+- Jobs are listed with job ID, status, and command
+- Completed jobs are shown once as notification, then automatically removed
+- Job IDs are assigned sequentially starting from 1 within each shell session
+- Thread-safe implementation for concurrent job management
+
+#### wait [job_id]
+Wait for background jobs to complete.
+
+```bash
+# Wait for all jobs
+sleep 5 & sleep 3 &
+wait                # Blocks until both complete
+echo "All done"
+
+# Wait for specific job
+sleep 10 &          # Returns: [1] 140234567890123
+sleep 5 &           # Returns: [2] 140234567890456
+wait 2              # Wait only for job [2]
+jobs                # Shows: [1] Running sleep 10
+wait 1              # Now wait for job [1]
+
+# Use wait's exit code
+sleep 2 &
+wait 1
+echo "Exit code: $?"    # 0 if job succeeded
+
+# Wait in scripts
+process_data() {
+    # Start parallel processing
+    process_file1 &
+    process_file2 &
+    process_file3 &
+
+    # Wait for all to complete before continuing
+    wait
+    echo "All files processed"
+}
+```
+
+**Usage:**
+- `wait` - Wait for all background jobs to complete
+- `wait <job_id>` - Wait for specific job to complete
+
+**Return Value:**
+- Returns the exit code of the waited job
+- Returns 0 when waiting for all jobs
+- Returns 127 if job ID not found
+- Returns 1 if job manager unavailable
+
+**Examples:**
+
+```bash
+# Parallel data processing
+for file in /local/tmp/data/*.txt; do
+    (cat $file | grep pattern > $file.filtered) &
+done
+wait    # Wait for all filtering to complete
+echo "All files filtered"
+
+# Error handling with wait
+long_task &
+job_id=$!
+if wait $job_id; then
+    echo "Task succeeded"
+else
+    echo "Task failed with code: $?"
+fi
+
+# Sequential processing with background tasks
+task1 &
+wait                # Wait for task1
+task2 &
+wait                # Wait for task2
+echo "Both tasks complete"
+```
+
+**Thread Safety:**
+- All job operations are thread-safe
+- Safe to call from multiple concurrent contexts
+- Jobs can be waited on from any thread
+
 #### source FILENAME [ARGUMENTS...]
 #### . FILENAME [ARGUMENTS...]
 Execute commands from a file in the current shell environment.
@@ -1165,6 +1476,70 @@ source /local/tmp/script.sh arg1 arg2
 
 ### AGFS Management
 
+#### chroot [PATH | --exit]
+Change the root directory context for the shell session. This restricts file operations to within the specified directory, similar to Unix `chroot`.
+
+```bash
+# Show current chroot status
+chroot
+# Output: No chroot set (full access)
+
+# Change root to a directory
+chroot /local/data
+# Output: Changed root to: /local/data
+
+# After chroot, all paths are relative to the new root
+pwd
+# Output: /
+
+ls /
+# Lists contents of /local/data (the new root)
+
+cd subdir
+pwd
+# Output: /subdir (actually /local/data/subdir)
+
+# Exit chroot and return to full access
+chroot --exit
+# or
+chroot -e
+# Output: Exited chroot
+
+# After exit, you're back to normal root
+pwd
+# Output: /
+```
+
+**Features:**
+- Restricts file operations to within a specified directory tree
+- All paths are interpreted relative to the chroot root
+- Prompt changes to `agfs[chroot]:/>` to indicate chroot mode
+- Use `--exit` or `-e` to exit chroot mode
+- Virtual path display: `pwd` and paths shown are relative to chroot root
+- Works with all file operations: `cd`, `ls`, `cat`, `mkdir`, etc.
+
+**Use Cases:**
+- Isolate operations to a specific project directory
+- Prevent accidental access to files outside a workspace
+- Create sandboxed environments for testing
+- Simplify path management within a deep directory structure
+
+**Example - Project Isolation:**
+```bash
+# Work on a specific project
+chroot /local/projects/myapp
+
+# Now all operations are confined to /local/projects/myapp
+mkdir src
+cd src
+touch main.py
+ls /
+# Shows: src (and other contents of /local/projects/myapp)
+
+# Exit when done
+chroot --exit
+```
+
 #### plugins
 Manage AGFS plugins.
 
@@ -1195,6 +1570,85 @@ mount customfs /custom option1=value1,option2=value2
 ```
 
 ### Utility Commands
+
+#### alias [name[=value] ...]
+Define or display command aliases. Create shortcuts for frequently used commands.
+
+```bash
+# List all aliases
+alias
+
+# Show specific alias
+alias ll
+
+# Create aliases
+alias ll='ls -l'
+alias la='ls -la'
+alias ..='cd ..'
+alias grep='grep --color=auto'
+
+# Use alias in commands
+ll /local/tmp
+..
+```
+
+**Features:**
+- Aliases are expanded before command execution
+- Support for any command with arguments
+- Aliases persist within shell session
+- Can create aliases for pipelines and complex commands
+
+**Examples:**
+
+```bash
+# Shortcut for long commands
+alias lh='ls -lh'
+alias count='wc -l'
+
+# Pipeline aliases
+alias errors='grep -i error'
+alias tofile='tee /local/tmp/output.txt'
+
+# Directory navigation
+alias home='cd /local'
+alias docs='cd /local/docs'
+
+# Use aliases
+cat /local/tmp/app.log | errors | count
+```
+
+**Note:** To prevent alias expansion, quote the command or use a backslash: `\command`
+
+#### unalias [-a] name [name ...]
+Remove command aliases.
+
+```bash
+# Remove single alias
+unalias ll
+
+# Remove multiple aliases
+unalias ll la lh
+
+# Remove all aliases
+unalias -a
+```
+
+**Options:**
+- `-a`: Remove all alias definitions
+
+**Examples:**
+
+```bash
+# Create and remove aliases
+alias test='echo test'
+test                    # Output: test
+unalias test
+test                    # Error: command not found
+
+# Clean up all aliases
+unalias -a
+alias                   # Shows no aliases
+```
 
 #### sleep seconds
 Pause execution for specified seconds (supports decimals).
@@ -1239,6 +1693,142 @@ Show help message.
 ```bash
 help                 # Display comprehensive help
 ```
+
+### Network Commands
+
+#### http METHOD URL [options]
+Make HTTP requests with persistent configuration. A minimalist HTTP client designed for shell scripting with bash-like state management.
+
+```bash
+# Basic requests
+http GET https://api.example.com/users
+http POST https://api.example.com/users -j '{"name":"alice"}'
+http DELETE https://api.example.com/users/123
+
+# With query parameters
+http GET https://httpbin.org/get -q term=hello -q limit=10
+
+# With custom headers
+http GET https://httpbin.org/headers -H "Authorization:Bearer token123"
+http POST https://httpbin.org/post -H "Content-Type:application/xml" -d '<data>...</data>'
+
+# Download binary files
+http GET https://example.com/file.tar.gz --stdout > file.tar.gz
+
+# Set base URL for cleaner commands
+http set base https://httpbin.org
+http GET /get
+http POST /post -j '{"name":"bob"}'
+
+# Set default headers (persist across requests)
+http set header Authorization "Bearer secret-token"
+http set header X-API-Version "v2"
+http GET /headers
+
+# Set timeout
+http set timeout 10s
+http set timeout 5000ms
+
+# Fail on non-2xx status codes
+http GET https://httpbin.org/status/404 -f
+
+# Show response headers
+http GET https://httpbin.org/get -i
+
+# Save response to variable
+http GET https://httpbin.org/get -o response
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-H key:value` | Add request header |
+| `-j JSON` | Send JSON body (auto-sets Content-Type: application/json) |
+| `-d DATA` | Send raw body data |
+| `-q key=value` | Add query parameter (can be used multiple times) |
+| `-f` | Fail on non-2xx status codes (returns exit code 1) |
+| `-i` | Show response headers in output |
+| `-o var` | Save response to shell variable |
+| `--stdout` | Output only raw response body (for binary downloads) |
+
+**Configuration Commands:**
+
+```bash
+http set base <url>              # Set base URL for relative paths
+http set header <key> <value>    # Set default header for all requests
+http set timeout <duration>      # Set timeout (e.g., 5s, 1000ms)
+```
+
+**State Management:**
+
+The HTTP client maintains persistent state within a shell session:
+- Base URL: Set once, use relative paths in subsequent requests
+- Default headers: Apply to all requests automatically
+- Timeout: Configurable per session
+
+State is stored in the shell and persists across commands in the same session.
+
+**Response Format:**
+
+Normal mode shows status line, optional headers, and body:
+```
+HTTP 200 (342ms)
+{"result":"success"}
+```
+
+With `--stdout` flag, only raw body is output (useful for piping or downloading):
+```bash
+http GET https://example.com/data.json --stdout | jq .
+http GET https://example.com/image.png --stdout > image.png
+```
+
+**Examples:**
+
+```bash
+# REST API workflow
+http set base https://jsonplaceholder.typicode.com
+http GET /posts/1
+http POST /posts -j '{"title":"foo","body":"bar","userId":1}'
+http PUT /posts/1 -j '{"id":1,"title":"updated","body":"content","userId":1}'
+http DELETE /posts/1
+
+# With authentication
+http set base https://api.github.com
+http set header Authorization "token ghp_xxxxxxxxxxxx"
+http set header Accept "application/vnd.github.v3+json"
+http GET /user/repos
+
+# Download files
+http GET https://example.com/archive.zip --stdout > archive.zip
+http GET https://cdn.example.com/image.jpg --stdout > image.jpg
+
+# Error handling
+http GET https://httpbin.org/status/200 -f -o result
+if [ $? -eq 0 ]; then
+    echo "Request successful"
+else
+    echo "Request failed"
+fi
+
+# Pipeline integration
+http GET https://httpbin.org/get --stdout | jq '.headers'
+http GET https://jsonplaceholder.typicode.com/users --stdout | jq '.[] | .name'
+```
+
+**Use Cases:**
+- REST API testing and interaction
+- Downloading files from URLs
+- CI/CD script integration
+- API automation in shell scripts
+- Quick HTTP requests without external tools
+
+**Technical Details:**
+- Uses Python's built-in `urllib.request` (no external dependencies)
+- Supports GET, POST, PUT, DELETE, PATCH, and all HTTP methods
+- Automatic JSON content-type headers with `-j` flag
+- Binary-safe for downloading files with `--stdout`
+- Reports response time in milliseconds
 
 ### AI Integration
 
@@ -1489,9 +2079,27 @@ agfs:/> if [ -f /local/tmp/file.txt ]; then
 
 When agfs-shell starts, it automatically checks for and executes initialization scripts from the AGFS filesystem. This allows you to set up environment variables, define functions, aliases, and perform other initialization tasks.
 
-### Initialization File Locations
+### Command Line Options
 
-The following files are checked in order. If a file exists, it is executed as an agfs-shell script:
+Control initrc execution with these options:
+
+```bash
+# Skip all initrc scripts
+agfs-shell --skip-initrc
+
+# Use a custom initrc script (skips default scripts)
+agfs-shell --initrc /path/to/custom_initrc.as
+
+# Custom initrc from AGFS path
+agfs-shell --initrc /etc/my_profile
+
+# Custom initrc from local filesystem
+agfs-shell --initrc ~/my_initrc.as
+```
+
+### Default Initialization File Locations
+
+When no `--initrc` or `--skip-initrc` is specified, the following files are checked in order. If a file exists, it is executed as an agfs-shell script:
 
 1. `/etc/rc`
 2. `/etc/initrc`
@@ -1836,12 +2444,17 @@ agfs-shell/
 │   ├── parser.py            # Command line parser
 │   ├── builtins.py          # Built-in command implementations
 │   ├── filesystem.py        # AGFS filesystem abstraction
+│   ├── http_client.py       # HTTP client with persistent state
 │   ├── config.py            # Configuration management
 │   ├── shell.py             # Shell with REPL and control flow
 │   ├── completer.py         # Tab completion
 │   ├── cli.py               # CLI entry point
 │   ├── exit_codes.py        # Exit code constants
-│   └── command_decorators.py # Command metadata
+│   ├── command_decorators.py # Command metadata
+│   └── commands/            # Built-in command modules
+│       ├── __init__.py      # Command registry
+│       ├── http.py          # HTTP command
+│       └── ...              # Other commands
 ├── pyproject.toml           # Project configuration
 ├── README.md                # This file
 └── examples/
@@ -1861,6 +2474,7 @@ agfs-shell/
 ### Key Features
 
 - Unix-style pipelines (`|`)
+- Background job control (`command &`, `jobs`, `wait`)
 - I/O Redirection (`<`, `>`, `>>`, `2>`, `2>>`)
 - Heredoc (`<<` with expansion)
 - Variables (`VAR=value`, `$VAR`, `${VAR}`)
@@ -1873,9 +2487,13 @@ agfs-shell/
 - Loop control (`break`, `continue`)
 - User-defined functions with local variables
 - Tab completion and history
-- 39+ built-in commands
+- 50+ built-in commands
 - Script execution (`.as` files)
+- HTTP client with persistent state (`http` command)
 - AI integration (`llm` command)
+- Chroot support for directory isolation
+- Command aliasing (`alias`/`unalias`)
+- VectorFS semantic search (`fsgrep`)
 
 ## Testing
 
@@ -1959,6 +2577,30 @@ Set request timeout:
 export AGFS_TIMEOUT=60
 uv run agfs-shell --timeout 60
 ```
+
+### Environment Variables
+
+Inject environment variables at startup using `--env`:
+
+```bash
+# Single variable
+agfs-shell --env FOO=bar
+
+# Multiple variables
+agfs-shell --env FOO=bar --env BAZ=qux -c 'echo $FOO $BAZ'
+
+# Bulk injection from shell environment
+agfs-shell --env "$(env)" -c 'echo $PATH'
+
+# Bulk injection from custom format (KEY=VALUE per line)
+agfs-shell --env "$(cat my_env_file)" -c 'env'
+```
+
+**Features:**
+- Single `KEY=VALUE` format for individual variables
+- Multi-line format for bulk injection (one `KEY=VALUE` per line)
+- Can be combined: `--env "$(env)" --env CUSTOM=value`
+- Variables are available immediately in shell session
 
 ## Technical Notes
 

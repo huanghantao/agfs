@@ -6,6 +6,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	log "github.com/sirupsen/logrus"
 )
 
 // AGFSFileHandle represents an open file handle
@@ -32,15 +33,19 @@ func (fh *AGFSFileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 
 // Write writes data to the file
 func (fh *AGFSFileHandle) Write(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	path := fh.node.getPath()
+	log.Debugf("[file] Write called: path=%s, len=%d, off=%d, handle=%d", path, len(data), off, fh.handle)
+
 	n, err := fh.node.root.handles.Write(fh.handle, data, off)
 	if err != nil {
+		log.Errorf("[file] Write failed: path=%s, err=%v", path, err)
 		return 0, syscall.EIO
 	}
 
 	// Invalidate metadata cache since file size may have changed
-	path := fh.node.getPath()
 	fh.node.root.metaCache.Invalidate(path)
 
+	log.Debugf("[file] Write success: path=%s, written=%d", path, n)
 	return uint32(n), 0
 }
 

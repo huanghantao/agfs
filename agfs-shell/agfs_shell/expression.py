@@ -918,6 +918,8 @@ class ExpressionExpander:
     def _restore_single_quoted(self, text: str, parts: List[str]) -> str:
         """
         Restore single-quoted content from placeholders.
+        The quotes are preserved so that later parsing stages can correctly
+        identify quoted content (e.g., for pipe and operator handling).
         """
         import re
         pattern = re.escape(self.SINGLE_QUOTE_PLACEHOLDER_PREFIX) + r'(\d{4})'
@@ -925,7 +927,8 @@ class ExpressionExpander:
         def replace(match):
             idx = int(match.group(1))
             if idx < len(parts):
-                return parts[idx]
+                # Restore with quotes preserved
+                return "'" + parts[idx] + "'"
             return match.group(0)
 
         return re.sub(pattern, replace, text)

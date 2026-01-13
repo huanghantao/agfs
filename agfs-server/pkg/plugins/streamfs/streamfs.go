@@ -513,6 +513,12 @@ func (sfs *StreamFS) Chmod(path string, mode uint32) error {
 	return fmt.Errorf("streamfs does not support chmod")
 }
 
+// Truncate is a no-op for streamfs since streams don't have traditional file sizes
+// This allows shell redirections to work properly
+func (sfs *StreamFS) Truncate(path string, size int64) error {
+	return nil
+}
+
 func (sfs *StreamFS) Open(path string) (io.ReadCloser, error) {
 	if path == "/README" {
 		return io.NopCloser(bytes.NewReader([]byte(getReadme()))), nil

@@ -15,7 +15,8 @@ def cmd_pwd(process: Process) -> int:
 
     Usage: pwd
     """
-    # Get cwd from process metadata if available
-    cwd = getattr(process, 'cwd', '/')
+    # Use virtual_cwd for display (shows path relative to chroot)
+    # Falls back to cwd if virtual_cwd is not set
+    cwd = getattr(process, 'virtual_cwd', None) or getattr(process, 'cwd', '/')
     process.stdout.write(f"{cwd}\n".encode('utf-8'))
     return 0
